@@ -1,0 +1,12 @@
+.gradle-cache/
+.gradle-test/
+
+**/.gradle/
+**/.kotlin/
+**/build/
+
+**/local.properties
+**/*.iml
+**/.idea/
+
+.DS_Store
