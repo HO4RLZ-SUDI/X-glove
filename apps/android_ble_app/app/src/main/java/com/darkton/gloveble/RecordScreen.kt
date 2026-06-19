@@ -12,6 +12,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
@@ -44,7 +45,7 @@ fun RecordScreen(
     onGoConnect: () -> Unit,
     onGoDataset: () -> Unit
 ) {
-    if (state.status != BleStatus.CONNECTED) {
+    if (!state.anyConnected) {
         NotConnectedPlaceholder(
             message = "เชื่อมต่อถุงมือก่อน แล้วจึงบันทึกท่ามือได้",
             onGoConnect = onGoConnect
@@ -53,7 +54,7 @@ fun RecordScreen(
     }
 
     var label by rememberSaveable { mutableStateOf("") }
-    val live = remember(state.latestPayload) { parseLiveGloveData(state.latestPayload) }
+    val connected = state.connectedHands
 
     when (state.recordingState) {
         RecordingState.IDLE -> {
@@ -67,7 +68,9 @@ fun RecordScreen(
                 item {
                     SectionCard(
                         title = "บันทึกท่ามือใหม่",
-                        subtitle = "ตั้งชื่อท่า กดเริ่ม แล้วค้างท่าไว้ ${RecordingDurationMs / 1000} วินาที"
+                        subtitle = "บันทึก ${connected.size} มือพร้อมกัน " +
+                            "(${connected.joinToString("+") { it.hand.short }}) " +
+                            "ค้างท่าไว้ ${RecordingDurationMs / 1000} วินาที"
                     ) {
                         OutlinedTextField(
                             value = label,
@@ -107,8 +110,9 @@ fun RecordScreen(
                     }
                 }
 
-                item {
-                    SectionCard(title = "ท่าปัจจุบันของมือ") {
+                items(connected, key = { it.hand }) { hand ->
+                    val live = remember(hand.latestPayload) { parseLiveGloveData(hand.latestPayload) }
+                    SectionCard(title = "ท่าปัจจุบัน — ${hand.hand.label}") {
                         HandVisualizer(
                             levels = live?.flex?.map { flexPercent(it) }
                                 ?: List(FlexChannels) { 0 },
@@ -174,13 +178,31 @@ fun RecordScreen(
                     textAlign = TextAlign.Center,
                     color = MaterialTheme.colorScheme.error
                 )
-                HandVisualizer(
-                    levels = live?.flex?.map { flexPercent(it) }
-                        ?: List(FlexChannels) { 0 },
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .height(150.dp)
-                )
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(12.dp)
+                ) {
+                    connected.forEach { hand ->
+                        val live = parseLiveGloveData(hand.latestPayload)
+                        Column(
+                            modifier = Modifier.weight(1f),
+                            horizontalAlignment = Alignment.CenterHorizontally
+                        ) {
+                            Text(
+                                text = hand.hand.short,
+                                style = MaterialTheme.typography.labelLarge,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                            HandVisualizer(
+                                levels = live?.flex?.map { flexPercent(it) }
+                                    ?: List(FlexChannels) { 0 },
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .height(130.dp)
+                            )
+                        }
+                    }
+                }
                 LinearProgressIndicator(
                     progress = {
                         (state.recordingSampleCount / expectedSamples.toFloat()).coerceIn(0f, 1f)

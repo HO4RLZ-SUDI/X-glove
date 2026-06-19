@@ -119,7 +119,8 @@ class MainActivity : ComponentActivity() {
                     onScanClick = { startScanWhenReady() },
                     onStopScanClick = viewModel::stopScan,
                     onConnectClick = viewModel::connect,
-                    onDisconnectClick = viewModel::disconnect,
+                    onDisconnectHand = viewModel::disconnect,
+                    onDisconnectAll = viewModel::disconnectAll,
                     onSaveNameClick = viewModel::writeDeviceName,
                     onSendCommandClick = viewModel::writeGloveCommand,
                     onSelectOledPage = viewModel::selectOledPage,
@@ -199,10 +200,11 @@ private fun GloveApp(
     onScanClick: () -> Unit,
     onStopScanClick: () -> Unit,
     onConnectClick: (String) -> Unit,
-    onDisconnectClick: () -> Unit,
-    onSaveNameClick: (String) -> Unit,
-    onSendCommandClick: (String) -> Unit,
-    onSelectOledPage: (OledDisplayPage) -> Unit,
+    onDisconnectHand: (Hand) -> Unit,
+    onDisconnectAll: () -> Unit,
+    onSaveNameClick: (Hand, String) -> Unit,
+    onSendCommandClick: (Hand, String) -> Unit,
+    onSelectOledPage: (Hand, OledDisplayPage) -> Unit,
     onStartRecording: (String) -> Unit,
     onCancelRecording: () -> Unit,
     onRefreshDataset: () -> Unit,
@@ -217,9 +219,9 @@ private fun GloveApp(
     var tabIndex by rememberSaveable { mutableIntStateOf(AppTab.CONNECT.ordinal) }
     val tab = AppTab.entries[tabIndex]
 
-    // Jump to the Live tab right after a successful connection.
-    LaunchedEffect(state.status) {
-        if (state.status == BleStatus.CONNECTED) {
+    // Jump to the Live tab as soon as the first glove comes online.
+    LaunchedEffect(state.anyConnected) {
+        if (state.anyConnected) {
             tabIndex = AppTab.LIVE.ordinal
         }
     }
@@ -255,7 +257,7 @@ private fun GloveApp(
                     onScanClick = onScanClick,
                     onStopScanClick = onStopScanClick,
                     onConnectClick = onConnectClick,
-                    onDisconnectClick = onDisconnectClick,
+                    onDisconnectHand = onDisconnectHand,
                     onGoLive = { tabIndex = AppTab.LIVE.ordinal }
                 )
                 AppTab.LIVE -> LiveScreen(
@@ -284,7 +286,7 @@ private fun GloveApp(
                     themeController = themeController,
                     onSaveNameClick = onSaveNameClick,
                     onSendCommandClick = onSendCommandClick,
-                    onDisconnectClick = onDisconnectClick,
+                    onDisconnectAll = onDisconnectAll,
                     onToggleLogs = onToggleLogs
                 )
             }
@@ -327,15 +329,24 @@ private fun GloveApp(
     }
 }
 
+/** Collapses the two per-hand links into a single banner status. */
+fun overallStatus(state: BleUiState): BleStatus = when {
+    state.anyConnected -> BleStatus.CONNECTED
+    state.anyConnecting -> BleStatus.CONNECTING
+    state.isScanning -> BleStatus.SCANNING
+    else -> BleStatus.DISCONNECTED
+}
+
 @Composable
 private fun ConnectionStatusBar(state: BleUiState) {
-    val targetColor = when (state.status) {
+    val status = overallStatus(state)
+    val targetColor = when (status) {
         BleStatus.DISCONNECTED -> MaterialTheme.colorScheme.error
         BleStatus.SCANNING -> MaterialTheme.colorScheme.secondary
         BleStatus.CONNECTING -> MaterialTheme.colorScheme.tertiary
         BleStatus.CONNECTED -> MaterialTheme.colorScheme.primary
     }
-    val contentColor = when (state.status) {
+    val contentColor = when (status) {
         BleStatus.DISCONNECTED -> MaterialTheme.colorScheme.onError
         BleStatus.SCANNING -> MaterialTheme.colorScheme.onSecondary
         BleStatus.CONNECTING -> MaterialTheme.colorScheme.onTertiary
@@ -347,6 +358,19 @@ private fun ConnectionStatusBar(state: BleUiState) {
         label = "statusColor"
     )
 
+    val title = when {
+        state.anyConnected -> state.connectedHands.joinToString(" + ") {
+            "${it.hand.short}:${it.connectedName ?: "Glove"}"
+        }
+        else -> status.label
+    }
+    val subtitle = when (status) {
+        BleStatus.CONNECTED -> "เชื่อมต่อแล้ว ${state.connectedCount}/2 มือ"
+        BleStatus.CONNECTING -> "กำลังเชื่อมต่อถุงมือ"
+        BleStatus.SCANNING -> "กำลังค้นหาถุงมือ"
+        BleStatus.DISCONNECTED -> "ยังไม่ได้เชื่อมต่อ"
+    }
+
     Surface(
         color = color,
         contentColor = contentColor
@@ -357,15 +381,11 @@ private fun ConnectionStatusBar(state: BleUiState) {
                 .padding(horizontal = 16.dp, vertical = 12.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
-            StatusPulse(state = state, color = contentColor)
+            StatusPulse(status = status, color = contentColor)
             Spacer(Modifier.width(10.dp))
             Column(Modifier.weight(1f)) {
                 Text(
-                    text = if (state.status == BleStatus.CONNECTED) {
-                        state.connectedName ?: state.status.label
-                    } else {
-                        state.status.label
-                    },
+                    text = title,
                     color = contentColor,
                     style = MaterialTheme.typography.titleMedium,
                     fontWeight = FontWeight.Bold,
@@ -373,7 +393,7 @@ private fun ConnectionStatusBar(state: BleUiState) {
                     overflow = TextOverflow.Ellipsis
                 )
                 Text(
-                    text = state.phase.label,
+                    text = subtitle,
                     color = contentColor.copy(alpha = 0.78f),
                     style = MaterialTheme.typography.labelSmall,
                     maxLines = 1,
@@ -381,7 +401,7 @@ private fun ConnectionStatusBar(state: BleUiState) {
                 )
             }
             Spacer(Modifier.width(12.dp))
-            if (state.status == BleStatus.SCANNING || state.status == BleStatus.CONNECTING) {
+            if (status == BleStatus.SCANNING || status == BleStatus.CONNECTING) {
                 CircularProgressIndicator(
                     modifier = Modifier.size(20.dp),
                     strokeWidth = 2.dp,
@@ -393,7 +413,7 @@ private fun ConnectionStatusBar(state: BleUiState) {
 }
 
 @Composable
-private fun StatusPulse(state: BleUiState, color: Color) {
+private fun StatusPulse(status: BleStatus, color: Color) {
     val transition = rememberInfiniteTransition(label = "statusPulse")
     val progress by transition.animateFloat(
         initialValue = 0f,
@@ -404,9 +424,9 @@ private fun StatusPulse(state: BleUiState, color: Color) {
         ),
         label = "statusPulseProgress"
     )
-    val active = state.status == BleStatus.SCANNING ||
-        state.status == BleStatus.CONNECTING ||
-        state.status == BleStatus.CONNECTED
+    val active = status == BleStatus.SCANNING ||
+        status == BleStatus.CONNECTING ||
+        status == BleStatus.CONNECTED
 
     Canvas(modifier = Modifier.size(28.dp)) {
         val radius = size.minDimension / 4f
@@ -417,7 +437,7 @@ private fun StatusPulse(state: BleUiState, color: Color) {
             )
         }
         drawCircle(
-            color = color.copy(alpha = if (state.status == BleStatus.CONNECTED) 1f else 0.82f),
+            color = color.copy(alpha = if (status == BleStatus.CONNECTED) 1f else 0.82f),
             radius = radius
         )
     }

@@ -17,15 +17,35 @@ const val RecordingDurationMs = 3000L
 const val FlexChannels = 5
 
 /**
+ * Which physical glove a connection / sample belongs to. The app holds two
+ * simultaneous BLE links — one per hand — and the slot is assigned
+ * automatically from the device name (see BleViewModel.handFromName).
+ */
+enum class Hand(val label: String, val short: String) {
+    LEFT("มือซ้าย", "L"),
+    RIGHT("มือขวา", "R");
+
+    companion object {
+        fun fromShort(code: String?): Hand? = when (code?.trim()?.uppercase()) {
+            "L", "LEFT" -> LEFT
+            "R", "RIGHT" -> RIGHT
+            else -> null
+        }
+    }
+}
+
+/**
  * One telemetry sample: five flex channels plus the MPU6050 accel/gyro (raw
  * int16 counts straight from the sensor). IMU fields default to 0 so samples
- * and CSV rows recorded before the IMU existed still load.
+ * and CSV rows recorded before the IMU existed still load. `hand` tags which
+ * glove produced the sample so a dual-hand recording stays separable.
  */
 data class FlexSample(
     val timestampMs: Long,
     val f1: Int, val f2: Int, val f3: Int, val f4: Int, val f5: Int,
     val ax: Int = 0, val ay: Int = 0, val az: Int = 0,
-    val gx: Int = 0, val gy: Int = 0, val gz: Int = 0
+    val gx: Int = 0, val gy: Int = 0, val gz: Int = 0,
+    val hand: Hand = Hand.LEFT
 )
 
 data class GestureSession(
@@ -36,6 +56,7 @@ data class GestureSession(
 ) {
     val sampleCount: Int get() = samples.size
     val durationMs: Long get() = samples.lastOrNull()?.timestampMs ?: 0L
+    val hands: List<Hand> get() = samples.map { it.hand }.distinct().sortedBy { it.ordinal }
 }
 
 enum class RecordingState { IDLE, COUNTDOWN, RECORDING }
@@ -89,10 +110,11 @@ data class BleDeviceItem(
     val isLikelyGlove: Boolean
 )
 
-data class BleUiState(
+/** Everything about a single glove link (one hand). */
+data class HandConnection(
+    val hand: Hand,
     val status: BleStatus = BleStatus.DISCONNECTED,
     val phase: ConnectionPhase = ConnectionPhase.IDLE,
-    val devices: List<BleDeviceItem> = emptyList(),
     val connectedName: String? = null,
     val connectedAddress: String? = null,
     val connectedRssi: Int? = null,
@@ -102,7 +124,18 @@ data class BleUiState(
     val glovePacketCount: Int = 0,
     val selectedOledPage: OledDisplayPage = OledDisplayPage.DASHBOARD,
     val isSavingName: Boolean = false,
-    val isSendingCommand: Boolean = false,
+    val isSendingCommand: Boolean = false
+) {
+    val isConnected: Boolean get() = status == BleStatus.CONNECTED
+    val isBusy: Boolean get() = isSavingName || isSendingCommand
+}
+
+data class BleUiState(
+    val left: HandConnection = HandConnection(Hand.LEFT),
+    val right: HandConnection = HandConnection(Hand.RIGHT),
+    val isScanning: Boolean = false,
+    val scanPhase: ConnectionPhase = ConnectionPhase.IDLE,
+    val devices: List<BleDeviceItem> = emptyList(),
     val showLogs: Boolean = false,
     val logs: List<String> = emptyList(),
     val dialog: UiDialog? = null,
@@ -117,7 +150,16 @@ data class BleUiState(
     val datasetCsvPath: String? = null,
     val datasetMessage: String? = null,
     val isDatasetLoading: Boolean = false
-)
+) {
+    fun hand(h: Hand): HandConnection = if (h == Hand.LEFT) left else right
+
+    val hands: List<HandConnection> get() = listOf(left, right)
+    val connectedHands: List<HandConnection> get() = hands.filter { it.isConnected }
+    val anyConnected: Boolean get() = left.isConnected || right.isConnected
+    val anyConnecting: Boolean
+        get() = left.status == BleStatus.CONNECTING || right.status == BleStatus.CONNECTING
+    val connectedCount: Int get() = connectedHands.size
+}
 
 sealed interface UiEvent {
     data class Toast(val message: String) : UiEvent

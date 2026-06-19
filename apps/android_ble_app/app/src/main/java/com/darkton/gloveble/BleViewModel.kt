@@ -72,21 +72,30 @@ class BleViewModel(application: Application) : AndroidViewModel(application) {
     val events: SharedFlow<UiEvent> = _events.asSharedFlow()
 
     private val scannedDevices = linkedMapOf<String, BluetoothDevice>()
-    private var bluetoothGatt: BluetoothGatt? = null
-    private var nameCharacteristic: BluetoothGattCharacteristic? = null
     private var scanActive = false
-    private var connectedAtMillis = 0L
     private var scanWatchdogJob: Job? = null
-    private var connectingAddress: String? = null
-    private var connectAttempt = 0
-    private var rssiJob: Job? = null
-    private var uptimeJob: Job? = null
-    private var connectionTimeoutJob: Job? = null
-    private var saveTimeoutJob: Job? = null
-    private var commandTimeoutJob: Job? = null
-    private var nameConfirmReadJob: Job? = null
-    private var pendingWriteKind: PendingWriteKind? = null
-    private var pendingName: String? = null
+
+    /** Per-hand runtime state for the two simultaneous GATT connections. */
+    private inner class HandLink(val hand: Hand) {
+        var gatt: BluetoothGatt? = null
+        var nameCharacteristic: BluetoothGattCharacteristic? = null
+        var connectedAtMillis = 0L
+        var connectingAddress: String? = null
+        var connectAttempt = 0
+        var rssiJob: Job? = null
+        var uptimeJob: Job? = null
+        var connectionTimeoutJob: Job? = null
+        var saveTimeoutJob: Job? = null
+        var commandTimeoutJob: Job? = null
+        var nameConfirmReadJob: Job? = null
+        var pendingWriteKind: PendingWriteKind? = null
+        var pendingName: String? = null
+        val callback = HandGattCallback(hand)
+    }
+
+    private val leftLink = HandLink(Hand.LEFT)
+    private val rightLink = HandLink(Hand.RIGHT)
+    private fun link(hand: Hand): HandLink = if (hand == Hand.LEFT) leftLink else rightLink
 
     private val recordingBuffer = mutableListOf<FlexSample>()
     private var recordingLabel = ""
@@ -98,6 +107,22 @@ class BleViewModel(application: Application) : AndroidViewModel(application) {
     init {
         refreshDataset()
     }
+
+    // ---------- State helpers ----------
+
+    private fun updateHand(hand: Hand, transform: (HandConnection) -> HandConnection) {
+        _uiState.update { state ->
+            if (hand == Hand.LEFT) {
+                state.copy(left = transform(state.left))
+            } else {
+                state.copy(right = transform(state.right))
+            }
+        }
+    }
+
+    private fun handState(hand: Hand): HandConnection = _uiState.value.hand(hand)
+
+    // ---------- Scanning ----------
 
     private val scanCallback = object : ScanCallback() {
         @SuppressLint("MissingPermission")
@@ -138,217 +163,13 @@ class BleViewModel(application: Application) : AndroidViewModel(application) {
             addLog(message)
             _uiState.update {
                 it.copy(
-                    status = BleStatus.DISCONNECTED,
-                    phase = ConnectionPhase.IDLE,
+                    isScanning = false,
+                    scanPhase = ConnectionPhase.IDLE,
                     dialog = UiDialog(
                         title = "Scan failed",
                         message = "สแกน BLE ไม่สำเร็จ ($errorCode). ลองปิด/เปิด Bluetooth แล้วสแกนใหม่"
                     )
                 )
-            }
-        }
-    }
-
-    private val gattCallback = object : BluetoothGattCallback() {
-        @SuppressLint("MissingPermission")
-        override fun onConnectionStateChange(gatt: BluetoothGatt, status: Int, newState: Int) {
-            when {
-                status != BluetoothGatt.GATT_SUCCESS -> {
-                    addLog("GATT connection error: $status")
-                    // Error 133 (and friends) is a flaky, device-specific GATT failure
-                    // common on Realme/Oppo/Xiaomi. Retry the direct connection a few
-                    // times before giving up instead of failing on the first attempt.
-                    val address = connectingAddress
-                    if (
-                        _uiState.value.status == BleStatus.CONNECTING &&
-                        address != null &&
-                        connectAttempt < MAX_CONNECT_ATTEMPTS
-                    ) {
-                        connectAttempt++
-                        addLog("Retrying connection (attempt $connectAttempt) after error $status")
-                        closeGatt()
-                        viewModelScope.launch {
-                            delay(450)
-                            if (_uiState.value.status == BleStatus.CONNECTING) {
-                                openGatt(address)
-                            }
-                        }
-                    } else {
-                        failConnection("เชื่อมต่อ BLE ไม่สำเร็จ ($status)")
-                    }
-                }
-                newState == BluetoothProfile.STATE_CONNECTED -> {
-                    addLog("Connected, discovering services")
-                    if (!hasConnectPermission()) {
-                        showPermissionDenied()
-                        handleDisconnected(lost = false)
-                        return
-                    }
-                    _uiState.update { it.copy(phase = ConnectionPhase.DISCOVERING) }
-                    gatt.requestConnectionPriority(BluetoothGatt.CONNECTION_PRIORITY_HIGH)
-                    // Match the firmware so a full flex + IMU packet fits one notification.
-                    gatt.requestMtu(185)
-                    val discoveryStarted = gatt.discoverServices()
-                    if (!discoveryStarted) {
-                        failConnection("เริ่มค้นหา service ไม่สำเร็จ")
-                    }
-                }
-                newState == BluetoothProfile.STATE_DISCONNECTED -> {
-                    addLog("Disconnected")
-                    val wasActive = _uiState.value.status == BleStatus.CONNECTED ||
-                        _uiState.value.status == BleStatus.CONNECTING
-                    handleDisconnected(lost = wasActive)
-                }
-            }
-        }
-
-        @SuppressLint("MissingPermission")
-        override fun onServicesDiscovered(gatt: BluetoothGatt, status: Int) {
-            if (status != BluetoothGatt.GATT_SUCCESS) {
-                failConnection("ค้นหา service ไม่สำเร็จ ($status)")
-                return
-            }
-
-            val service = gatt.getService(Esp32ServiceUuid)
-            val characteristic = service?.getCharacteristic(Esp32NameCharacteristicUuid)
-            if (service == null || characteristic == null) {
-                failConnection("ไม่พบ Service/Characteristic ของ ESP32 ในอุปกรณ์นี้")
-                return
-            }
-
-            nameCharacteristic = characteristic
-            connectedAtMillis = SystemClock.elapsedRealtime()
-            connectionTimeoutJob?.cancel()
-            _uiState.update { it.copy(phase = ConnectionPhase.STARTING_STREAM) }
-
-            val device = gatt.device
-            val name = safeDeviceName(device) ?: _uiState.value.connectedName ?: "ESP32"
-            _uiState.update {
-                it.copy(
-                    status = BleStatus.CONNECTED,
-                    phase = ConnectionPhase.CONNECTED,
-                    connectedName = name,
-                    connectedAddress = device.address,
-                    connectedUptimeSeconds = 0,
-                    isSavingName = false,
-                    isSendingCommand = false,
-                    dialog = null
-                )
-            }
-            addLog("GATT ready: ${device.address}")
-            startConnectedTickers()
-            if (!enableNotifications(gatt, characteristic)) {
-                readNameCharacteristic(gatt, characteristic)
-            }
-        }
-
-        override fun onDescriptorWrite(
-            gatt: BluetoothGatt,
-            descriptor: BluetoothGattDescriptor,
-            status: Int
-        ) {
-            if (descriptor.uuid != ClientCharacteristicConfigUuid) return
-            if (status == BluetoothGatt.GATT_SUCCESS) {
-                addLog("Notification enabled")
-            } else {
-                addLog("Notification descriptor failed: $status")
-            }
-            val characteristic = nameCharacteristic ?: return
-            readNameCharacteristic(gatt, characteristic)
-        }
-
-        override fun onMtuChanged(gatt: BluetoothGatt, mtu: Int, status: Int) {
-            addLog("MTU changed: mtu=$mtu status=$status")
-        }
-
-        override fun onReadRemoteRssi(gatt: BluetoothGatt, rssi: Int, status: Int) {
-            if (status == BluetoothGatt.GATT_SUCCESS) {
-                _uiState.update { it.copy(connectedRssi = rssi) }
-            }
-        }
-
-        @Deprecated("Deprecated in Android 13, kept for older devices")
-        override fun onCharacteristicRead(
-            gatt: BluetoothGatt,
-            characteristic: BluetoothGattCharacteristic,
-            status: Int
-        ) {
-            if (characteristic.uuid == Esp32NameCharacteristicUuid &&
-                status == BluetoothGatt.GATT_SUCCESS
-            ) {
-                @Suppress("DEPRECATION")
-                handleCharacteristicPayload(characteristic.value, fromNotification = false)
-            }
-        }
-
-        override fun onCharacteristicRead(
-            gatt: BluetoothGatt,
-            characteristic: BluetoothGattCharacteristic,
-            value: ByteArray,
-            status: Int
-        ) {
-            if (characteristic.uuid == Esp32NameCharacteristicUuid &&
-                status == BluetoothGatt.GATT_SUCCESS
-            ) {
-                handleCharacteristicPayload(value, fromNotification = false)
-            }
-        }
-
-        @Deprecated("Deprecated in Android 13, kept for older devices")
-        override fun onCharacteristicChanged(
-            gatt: BluetoothGatt,
-            characteristic: BluetoothGattCharacteristic
-        ) {
-            if (characteristic.uuid == Esp32NameCharacteristicUuid) {
-                @Suppress("DEPRECATION")
-                handleCharacteristicPayload(characteristic.value, fromNotification = true)
-            }
-        }
-
-        override fun onCharacteristicChanged(
-            gatt: BluetoothGatt,
-            characteristic: BluetoothGattCharacteristic,
-            value: ByteArray
-        ) {
-            if (characteristic.uuid == Esp32NameCharacteristicUuid) {
-                handleCharacteristicPayload(value, fromNotification = true)
-            }
-        }
-
-        override fun onCharacteristicWrite(
-            gatt: BluetoothGatt,
-            characteristic: BluetoothGattCharacteristic,
-            status: Int
-        ) {
-            if (characteristic.uuid != Esp32NameCharacteristicUuid) return
-            if (status == BluetoothGatt.GATT_SUCCESS) {
-                when (pendingWriteKind) {
-                    PendingWriteKind.DEVICE_NAME -> {
-                        addLog("Name write sent")
-                        scheduleNameReadBack(gatt, characteristic)
-                    }
-                    PendingWriteKind.COMMAND -> {
-                        commandTimeoutJob?.cancel()
-                        pendingWriteKind = null
-                        _uiState.update { it.copy(isSendingCommand = false) }
-                        emitToast("ส่งคำสั่งแล้ว")
-                        addLog("Command write sent")
-                    }
-                    null -> addLog("Write sent")
-                }
-            } else {
-                saveTimeoutJob?.cancel()
-                commandTimeoutJob?.cancel()
-                pendingWriteKind = null
-                pendingName = null
-                _uiState.update {
-                    it.copy(
-                        isSavingName = false,
-                        isSendingCommand = false
-                    )
-                }
-                emitToast("ส่งข้อมูลไม่สำเร็จ ($status)")
-                addLog("Characteristic write failed: $status")
             }
         }
     }
@@ -375,24 +196,19 @@ class BleViewModel(application: Application) : AndroidViewModel(application) {
         // Location Services are off — the classic "works on my phone, not my
         // friend's" symptom. Block early with an actionable prompt.
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.S && !isLocationServiceEnabled()) {
-            showLocationOff(blocking = true)
+            showLocationOff()
             return
         }
 
         stopScan()
         scannedDevices.clear()
+        // Scanning does NOT touch the existing connections — the user may already
+        // have one hand online and be scanning to add the other.
         _uiState.update {
             it.copy(
-                status = BleStatus.SCANNING,
-                phase = ConnectionPhase.SCANNING,
+                isScanning = true,
+                scanPhase = ConnectionPhase.SCANNING,
                 devices = emptyList(),
-                connectedName = null,
-                connectedAddress = null,
-                connectedRssi = null,
-                connectedUptimeSeconds = 0,
-                latestPayload = null,
-                latestPayloadAtMillis = null,
-                glovePacketCount = 0,
                 dialog = null
             )
         }
@@ -412,10 +228,6 @@ class BleViewModel(application: Application) : AndroidViewModel(application) {
             scanner.startScan(null, settings, scanCallback)
             scanActive = true
             addLog("Scanning for ESP32 or service $Esp32ServiceUuid")
-            // Android 12+ AOSP doesn't require Location Services, but realme UI /
-            // ColorOS, MIUI and similar still return zero scan results without it.
-            // Prompt right away instead of leaving the user waiting; the scan keeps
-            // running for devices that genuinely don't need it.
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S && !isLocationServiceEnabled()) {
                 addLog("Location Services off on Android 12+; realme/Xiaomi/Oppo need it for BLE scan")
                 _uiState.update { it.copy(dialog = locationDialog()) }
@@ -427,16 +239,12 @@ class BleViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    // On Android 12+ AOSP doesn't require Location Services, but ColorOS/realme
-    // UI, MIUI and similar still return nothing without it. If a scan turns up
-    // empty, surface the same fix instead of leaving the user staring at an
-    // endless "scanning..." with no devices.
     private fun startScanWatchdog() {
         scanWatchdogJob?.cancel()
         scanWatchdogJob = viewModelScope.launch {
             delay(8000)
             val state = _uiState.value
-            if (state.status == BleStatus.SCANNING && state.devices.isEmpty()) {
+            if (state.isScanning && state.devices.isEmpty()) {
                 if (!isLocationServiceEnabled()) {
                     addLog("No devices after 8s and Location Services off")
                     _uiState.update { it.copy(dialog = locationDialog()) }
@@ -451,22 +259,20 @@ class BleViewModel(application: Application) : AndroidViewModel(application) {
         scanWatchdogJob?.cancel()
         scanWatchdogJob = null
         val adapter = bluetoothAdapter ?: return
-        if (!scanActive || !hasScanPermission()) return
+        if (!scanActive || !hasScanPermission()) {
+            _uiState.update { it.copy(isScanning = false, scanPhase = ConnectionPhase.IDLE) }
+            return
+        }
         runCatching {
             @SuppressLint("MissingPermission")
             adapter.bluetoothLeScanner?.stopScan(scanCallback)
         }
         scanActive = false
-        if (_uiState.value.status == BleStatus.SCANNING) {
-            _uiState.update {
-                it.copy(
-                    status = BleStatus.DISCONNECTED,
-                    phase = ConnectionPhase.IDLE
-                )
-            }
-        }
+        _uiState.update { it.copy(isScanning = false, scanPhase = ConnectionPhase.IDLE) }
         addLog("Scan stopped")
     }
+
+    // ---------- Connecting ----------
 
     fun connect(address: String) {
         val device = scannedDevices[address]
@@ -479,77 +285,19 @@ class BleViewModel(application: Application) : AndroidViewModel(application) {
             return
         }
 
+        val name = safeDeviceName(device) ?: deviceItemName(address)
+        val hand = resolveHand(address, name)
+
+        // If this slot is already busy, tear it down before reusing it.
+        closeLink(hand)
+
         stopScan()
-        closeGatt()
-        _uiState.update {
+        updateHand(hand) {
             it.copy(
                 status = BleStatus.CONNECTING,
                 phase = ConnectionPhase.CONNECTING,
-                connectedName = safeDeviceName(device) ?: "ESP32",
+                connectedName = name ?: "ESP32",
                 connectedAddress = address,
-                connectedRssi = null,
-                connectedUptimeSeconds = 0,
-                latestPayload = null,
-                latestPayloadAtMillis = null,
-                glovePacketCount = 0,
-                isSavingName = false,
-                isSendingCommand = false,
-                dialog = null
-            )
-        }
-        addLog("Connecting to $address")
-        connectingAddress = address
-        connectAttempt = 0
-        startConnectionTimeout(address)
-        openGatt(address)
-    }
-
-    @SuppressLint("MissingPermission")
-    private fun openGatt(address: String) {
-        val device = scannedDevices[address] ?: bluetoothAdapter?.getRemoteDevice(address)
-        if (device == null) {
-            failConnection("ไม่พบอุปกรณ์นี้แล้ว ลองสแกนใหม่")
-            return
-        }
-        if (!hasConnectPermission()) {
-            showPermissionDenied()
-            return
-        }
-
-        try {
-            bluetoothGatt = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
-                device.connectGatt(appContext, false, gattCallback, BluetoothDevice.TRANSPORT_LE)
-            } else {
-                device.connectGatt(appContext, false, gattCallback)
-            }
-            if (bluetoothGatt == null) {
-                failConnection("เริ่มเชื่อมต่อ BLE ไม่สำเร็จ")
-            }
-        } catch (error: SecurityException) {
-            addLog("Connect permission error: ${error.message}")
-            connectionTimeoutJob?.cancel()
-            showPermissionDenied()
-        }
-    }
-
-    fun disconnect() {
-        addLog("Disconnect requested")
-        connectingAddress = null
-        connectAttempt = 0
-        stopConnectedTickers()
-        if (hasConnectPermission()) {
-            runCatching {
-                @SuppressLint("MissingPermission")
-                bluetoothGatt?.disconnect()
-            }
-        }
-        closeGatt()
-        _uiState.update {
-            it.copy(
-                status = BleStatus.DISCONNECTED,
-                phase = ConnectionPhase.IDLE,
-                connectedName = null,
-                connectedAddress = null,
                 connectedRssi = null,
                 connectedUptimeSeconds = 0,
                 latestPayload = null,
@@ -559,10 +307,308 @@ class BleViewModel(application: Application) : AndroidViewModel(application) {
                 isSendingCommand = false
             )
         }
+        _uiState.update { it.copy(dialog = null) }
+        addLog("Connecting ${hand.short} to $address")
+        val handLink = link(hand)
+        handLink.connectingAddress = address
+        handLink.connectAttempt = 0
+        startConnectionTimeout(hand, address)
+        openGatt(hand, address)
     }
 
-    fun writeDeviceName(name: String) {
+    /** Picks which hand slot a device should occupy, from its name then free slots. */
+    private fun resolveHand(address: String, name: String?): Hand {
+        handFromName(name)?.let { return it }
+        val state = _uiState.value
+        val leftFree = !state.left.isConnected && state.left.status != BleStatus.CONNECTING
+        val rightFree = !state.right.isConnected && state.right.status != BleStatus.CONNECTING
+        return when {
+            // Don't displace a slot already pointed at this address.
+            state.left.connectedAddress == address -> Hand.LEFT
+            state.right.connectedAddress == address -> Hand.RIGHT
+            leftFree -> Hand.LEFT
+            rightFree -> Hand.RIGHT
+            else -> Hand.LEFT
+        }
+    }
+
+    private fun handFromName(name: String?): Hand? {
+        if (name.isNullOrBlank()) return null
+        val trimmed = name.trim()
+        val lower = trimmed.lowercase(Locale.US)
+        if (lower.contains("right") || trimmed.contains("ขวา")) return Hand.RIGHT
+        if (lower.contains("left") || trimmed.contains("ซ้าย")) return Hand.LEFT
+        // Fall back to a trailing single letter, e.g. "Glove R" / "Glove-L".
+        return when (trimmed.trimEnd().lastOrNull()?.uppercaseChar()) {
+            'R' -> Hand.RIGHT
+            'L' -> Hand.LEFT
+            else -> null
+        }
+    }
+
+    private fun deviceItemName(address: String): String? =
+        _uiState.value.devices.firstOrNull { it.address == address }?.name
+
+    @SuppressLint("MissingPermission")
+    private fun openGatt(hand: Hand, address: String) {
+        val device = scannedDevices[address] ?: bluetoothAdapter?.getRemoteDevice(address)
+        if (device == null) {
+            failConnection(hand, "ไม่พบอุปกรณ์นี้แล้ว ลองสแกนใหม่")
+            return
+        }
+        if (!hasConnectPermission()) {
+            showPermissionDenied()
+            return
+        }
+
+        val handLink = link(hand)
+        try {
+            handLink.gatt = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                device.connectGatt(appContext, false, handLink.callback, BluetoothDevice.TRANSPORT_LE)
+            } else {
+                device.connectGatt(appContext, false, handLink.callback)
+            }
+            if (handLink.gatt == null) {
+                failConnection(hand, "เริ่มเชื่อมต่อ BLE ไม่สำเร็จ")
+            }
+        } catch (error: SecurityException) {
+            addLog("Connect permission error: ${error.message}")
+            handLink.connectionTimeoutJob?.cancel()
+            showPermissionDenied()
+        }
+    }
+
+    fun disconnect(hand: Hand) {
+        addLog("Disconnect requested (${hand.short})")
+        val handLink = link(hand)
+        handLink.connectingAddress = null
+        handLink.connectAttempt = 0
+        stopConnectedTickers(hand)
+        if (hasConnectPermission()) {
+            runCatching {
+                @SuppressLint("MissingPermission")
+                handLink.gatt?.disconnect()
+            }
+        }
+        closeLink(hand)
+        updateHand(hand) { HandConnection(hand) }
+    }
+
+    fun disconnectAll() {
+        disconnect(Hand.LEFT)
+        disconnect(Hand.RIGHT)
+    }
+
+    // ---------- GATT callback (one instance per hand) ----------
+
+    private inner class HandGattCallback(val hand: Hand) : BluetoothGattCallback() {
+        @SuppressLint("MissingPermission")
+        override fun onConnectionStateChange(gatt: BluetoothGatt, status: Int, newState: Int) {
+            val handLink = link(hand)
+            when {
+                status != BluetoothGatt.GATT_SUCCESS -> {
+                    addLog("GATT connection error (${hand.short}): $status")
+                    // Error 133 (and friends) is a flaky, device-specific GATT failure
+                    // common on Realme/Oppo/Xiaomi. Retry the direct connection a few
+                    // times before giving up instead of failing on the first attempt.
+                    val address = handLink.connectingAddress
+                    if (
+                        handState(hand).status == BleStatus.CONNECTING &&
+                        address != null &&
+                        handLink.connectAttempt < MAX_CONNECT_ATTEMPTS
+                    ) {
+                        handLink.connectAttempt++
+                        addLog("Retrying ${hand.short} (attempt ${handLink.connectAttempt}) after error $status")
+                        closeLink(hand)
+                        viewModelScope.launch {
+                            delay(450)
+                            if (handState(hand).status == BleStatus.CONNECTING) {
+                                openGatt(hand, address)
+                            }
+                        }
+                    } else {
+                        failConnection(hand, "เชื่อมต่อ BLE ไม่สำเร็จ ($status)")
+                    }
+                }
+                newState == BluetoothProfile.STATE_CONNECTED -> {
+                    addLog("Connected (${hand.short}), discovering services")
+                    if (!hasConnectPermission()) {
+                        showPermissionDenied()
+                        handleDisconnected(hand, lost = false)
+                        return
+                    }
+                    updateHand(hand) { it.copy(phase = ConnectionPhase.DISCOVERING) }
+                    gatt.requestConnectionPriority(BluetoothGatt.CONNECTION_PRIORITY_HIGH)
+                    gatt.requestMtu(185)
+                    val discoveryStarted = gatt.discoverServices()
+                    if (!discoveryStarted) {
+                        failConnection(hand, "เริ่มค้นหา service ไม่สำเร็จ")
+                    }
+                }
+                newState == BluetoothProfile.STATE_DISCONNECTED -> {
+                    addLog("Disconnected (${hand.short})")
+                    val wasActive = handState(hand).status == BleStatus.CONNECTED ||
+                        handState(hand).status == BleStatus.CONNECTING
+                    handleDisconnected(hand, lost = wasActive)
+                }
+            }
+        }
+
+        @SuppressLint("MissingPermission")
+        override fun onServicesDiscovered(gatt: BluetoothGatt, status: Int) {
+            if (status != BluetoothGatt.GATT_SUCCESS) {
+                failConnection(hand, "ค้นหา service ไม่สำเร็จ ($status)")
+                return
+            }
+
+            val service = gatt.getService(Esp32ServiceUuid)
+            val characteristic = service?.getCharacteristic(Esp32NameCharacteristicUuid)
+            if (service == null || characteristic == null) {
+                failConnection(hand, "ไม่พบ Service/Characteristic ของ ESP32 ในอุปกรณ์นี้")
+                return
+            }
+
+            val handLink = link(hand)
+            handLink.nameCharacteristic = characteristic
+            handLink.connectedAtMillis = SystemClock.elapsedRealtime()
+            handLink.connectionTimeoutJob?.cancel()
+            updateHand(hand) { it.copy(phase = ConnectionPhase.STARTING_STREAM) }
+
+            val device = gatt.device
+            val name = safeDeviceName(device) ?: handState(hand).connectedName ?: "ESP32"
+            updateHand(hand) {
+                it.copy(
+                    status = BleStatus.CONNECTED,
+                    phase = ConnectionPhase.CONNECTED,
+                    connectedName = name,
+                    connectedAddress = device.address,
+                    connectedUptimeSeconds = 0,
+                    isSavingName = false,
+                    isSendingCommand = false
+                )
+            }
+            _uiState.update { it.copy(dialog = null) }
+            addLog("GATT ready (${hand.short}): ${device.address}")
+            startConnectedTickers(hand)
+            if (!enableNotifications(gatt, characteristic)) {
+                readNameCharacteristic(gatt, characteristic)
+            }
+        }
+
+        override fun onDescriptorWrite(
+            gatt: BluetoothGatt,
+            descriptor: BluetoothGattDescriptor,
+            status: Int
+        ) {
+            if (descriptor.uuid != ClientCharacteristicConfigUuid) return
+            if (status == BluetoothGatt.GATT_SUCCESS) {
+                addLog("Notification enabled (${hand.short})")
+            } else {
+                addLog("Notification descriptor failed (${hand.short}): $status")
+            }
+            val characteristic = link(hand).nameCharacteristic ?: return
+            readNameCharacteristic(gatt, characteristic)
+        }
+
+        override fun onMtuChanged(gatt: BluetoothGatt, mtu: Int, status: Int) {
+            addLog("MTU changed (${hand.short}): mtu=$mtu status=$status")
+        }
+
+        override fun onReadRemoteRssi(gatt: BluetoothGatt, rssi: Int, status: Int) {
+            if (status == BluetoothGatt.GATT_SUCCESS) {
+                updateHand(hand) { it.copy(connectedRssi = rssi) }
+            }
+        }
+
+        @Deprecated("Deprecated in Android 13, kept for older devices")
+        override fun onCharacteristicRead(
+            gatt: BluetoothGatt,
+            characteristic: BluetoothGattCharacteristic,
+            status: Int
+        ) {
+            if (characteristic.uuid == Esp32NameCharacteristicUuid &&
+                status == BluetoothGatt.GATT_SUCCESS
+            ) {
+                @Suppress("DEPRECATION")
+                handleCharacteristicPayload(hand, characteristic.value, fromNotification = false)
+            }
+        }
+
+        override fun onCharacteristicRead(
+            gatt: BluetoothGatt,
+            characteristic: BluetoothGattCharacteristic,
+            value: ByteArray,
+            status: Int
+        ) {
+            if (characteristic.uuid == Esp32NameCharacteristicUuid &&
+                status == BluetoothGatt.GATT_SUCCESS
+            ) {
+                handleCharacteristicPayload(hand, value, fromNotification = false)
+            }
+        }
+
+        @Deprecated("Deprecated in Android 13, kept for older devices")
+        override fun onCharacteristicChanged(
+            gatt: BluetoothGatt,
+            characteristic: BluetoothGattCharacteristic
+        ) {
+            if (characteristic.uuid == Esp32NameCharacteristicUuid) {
+                @Suppress("DEPRECATION")
+                handleCharacteristicPayload(hand, characteristic.value, fromNotification = true)
+            }
+        }
+
+        override fun onCharacteristicChanged(
+            gatt: BluetoothGatt,
+            characteristic: BluetoothGattCharacteristic,
+            value: ByteArray
+        ) {
+            if (characteristic.uuid == Esp32NameCharacteristicUuid) {
+                handleCharacteristicPayload(hand, value, fromNotification = true)
+            }
+        }
+
+        override fun onCharacteristicWrite(
+            gatt: BluetoothGatt,
+            characteristic: BluetoothGattCharacteristic,
+            status: Int
+        ) {
+            if (characteristic.uuid != Esp32NameCharacteristicUuid) return
+            val handLink = link(hand)
+            if (status == BluetoothGatt.GATT_SUCCESS) {
+                when (handLink.pendingWriteKind) {
+                    PendingWriteKind.DEVICE_NAME -> {
+                        addLog("Name write sent (${hand.short})")
+                        scheduleNameReadBack(hand, gatt, characteristic)
+                    }
+                    PendingWriteKind.COMMAND -> {
+                        handLink.commandTimeoutJob?.cancel()
+                        handLink.pendingWriteKind = null
+                        updateHand(hand) { it.copy(isSendingCommand = false) }
+                        emitToast("ส่งคำสั่งแล้ว (${hand.short})")
+                        addLog("Command write sent (${hand.short})")
+                    }
+                    null -> addLog("Write sent (${hand.short})")
+                }
+            } else {
+                handLink.saveTimeoutJob?.cancel()
+                handLink.commandTimeoutJob?.cancel()
+                handLink.pendingWriteKind = null
+                handLink.pendingName = null
+                updateHand(hand) {
+                    it.copy(isSavingName = false, isSendingCommand = false)
+                }
+                emitToast("ส่งข้อมูลไม่สำเร็จ ($status)")
+                addLog("Characteristic write failed (${hand.short}): $status")
+            }
+        }
+    }
+
+    // ---------- Writes (per hand) ----------
+
+    fun writeDeviceName(hand: Hand, name: String) {
         val cleanName = name.trim()
+        val handLink = link(hand)
         when {
             cleanName.isEmpty() -> {
                 emitToast("กรุณาใส่ชื่ออุปกรณ์")
@@ -572,8 +618,8 @@ class BleViewModel(application: Application) : AndroidViewModel(application) {
                 emitToast("ชื่อยาวเกิน $MaxDeviceNameChars ตัวอักษร")
                 return
             }
-            _uiState.value.status != BleStatus.CONNECTED -> {
-                emitToast("ยังไม่ได้เชื่อมต่อ ESP32")
+            !handState(hand).isConnected -> {
+                emitToast("ยังไม่ได้เชื่อมต่อ ${hand.label}")
                 return
             }
             !hasConnectPermission() -> {
@@ -582,48 +628,42 @@ class BleViewModel(application: Application) : AndroidViewModel(application) {
             }
         }
 
-        if (pendingWriteKind != null) {
+        if (handLink.pendingWriteKind != null) {
             emitToast("รอให้คำสั่งก่อนหน้าจบก่อน")
             return
         }
 
-        pendingWriteKind = PendingWriteKind.DEVICE_NAME
-        pendingName = cleanName
-        _uiState.update {
-            it.copy(
-                isSavingName = true,
-                isSendingCommand = false
-            )
-        }
-        addLog("Writing name: $cleanName")
+        handLink.pendingWriteKind = PendingWriteKind.DEVICE_NAME
+        handLink.pendingName = cleanName
+        updateHand(hand) { it.copy(isSavingName = true, isSendingCommand = false) }
+        addLog("Writing name (${hand.short}): $cleanName")
 
-        saveTimeoutJob?.cancel()
-        saveTimeoutJob = viewModelScope.launch {
+        handLink.saveTimeoutJob?.cancel()
+        handLink.saveTimeoutJob = viewModelScope.launch {
             delay(5000)
-            if (_uiState.value.isSavingName) {
-                pendingWriteKind = null
-                pendingName = null
-                _uiState.update { it.copy(isSavingName = false) }
+            if (handState(hand).isSavingName) {
+                handLink.pendingWriteKind = null
+                handLink.pendingName = null
+                updateHand(hand) { it.copy(isSavingName = false) }
                 emitToast("ยังไม่ได้รับการยืนยันจาก ESP32")
-                addLog("Name write timed out")
+                addLog("Name write timed out (${hand.short})")
             }
         }
 
-        // Firmware only accepts a rename via the explicit "NAME:" command now,
-        // so unrecognized writes can no longer silently rename the glove.
         val payload = "NAME:$cleanName".toByteArray(StandardCharsets.UTF_8)
-        val started = writeCharacteristicPayload(payload)
+        val started = writeCharacteristicPayload(hand, payload)
         if (!started) {
-            saveTimeoutJob?.cancel()
-            pendingWriteKind = null
-            pendingName = null
-            _uiState.update { it.copy(isSavingName = false) }
+            handLink.saveTimeoutJob?.cancel()
+            handLink.pendingWriteKind = null
+            handLink.pendingName = null
+            updateHand(hand) { it.copy(isSavingName = false) }
             emitToast("เริ่มส่งชื่อไม่สำเร็จ")
         }
     }
 
-    fun writeGloveCommand(command: String) {
+    fun writeGloveCommand(hand: Hand, command: String) {
         val cleanCommand = command.trim()
+        val handLink = link(hand)
         when {
             cleanCommand.isEmpty() -> {
                 emitToast("กรุณาใส่คำสั่ง")
@@ -633,55 +673,58 @@ class BleViewModel(application: Application) : AndroidViewModel(application) {
                 emitToast("คำสั่งยาวเกิน $MaxCommandChars ตัวอักษร")
                 return
             }
-            _uiState.value.status != BleStatus.CONNECTED -> {
-                emitToast("ยังไม่ได้เชื่อมต่อถุงมือ")
+            !handState(hand).isConnected -> {
+                emitToast("ยังไม่ได้เชื่อมต่อ ${hand.label}")
                 return
             }
             !hasConnectPermission() -> {
                 showPermissionDenied()
                 return
             }
-            pendingWriteKind != null -> {
+            handLink.pendingWriteKind != null -> {
                 emitToast("รอให้คำสั่งก่อนหน้าจบก่อน")
                 return
             }
         }
 
-        pendingWriteKind = PendingWriteKind.COMMAND
-        _uiState.update { it.copy(isSendingCommand = true) }
-        addLog("Writing command: $cleanCommand")
+        handLink.pendingWriteKind = PendingWriteKind.COMMAND
+        updateHand(hand) { it.copy(isSendingCommand = true) }
+        addLog("Writing command (${hand.short}): $cleanCommand")
 
-        commandTimeoutJob?.cancel()
-        commandTimeoutJob = viewModelScope.launch {
+        handLink.commandTimeoutJob?.cancel()
+        handLink.commandTimeoutJob = viewModelScope.launch {
             delay(5000)
-            if (_uiState.value.isSendingCommand) {
-                pendingWriteKind = null
-                _uiState.update { it.copy(isSendingCommand = false) }
+            if (handState(hand).isSendingCommand) {
+                handLink.pendingWriteKind = null
+                updateHand(hand) { it.copy(isSendingCommand = false) }
                 emitToast("ส่งคำสั่งไม่สำเร็จ")
-                addLog("Command write timed out")
+                addLog("Command write timed out (${hand.short})")
             }
         }
 
-        val started = writeCharacteristicPayload(cleanCommand.toByteArray(StandardCharsets.UTF_8))
+        val started = writeCharacteristicPayload(hand, cleanCommand.toByteArray(StandardCharsets.UTF_8))
         if (!started) {
-            commandTimeoutJob?.cancel()
-            pendingWriteKind = null
-            _uiState.update { it.copy(isSendingCommand = false) }
+            handLink.commandTimeoutJob?.cancel()
+            handLink.pendingWriteKind = null
+            updateHand(hand) { it.copy(isSendingCommand = false) }
             emitToast("เริ่มส่งคำสั่งไม่สำเร็จ")
         }
     }
 
-    fun selectOledPage(page: OledDisplayPage) {
-        val state = _uiState.value
-        if (
-            state.status == BleStatus.CONNECTED &&
-            !state.isSavingName &&
-            !state.isSendingCommand
-        ) {
-            _uiState.update { it.copy(selectedOledPage = page) }
+    fun selectOledPage(hand: Hand, page: OledDisplayPage) {
+        val state = handState(hand)
+        if (state.isConnected && !state.isSavingName && !state.isSendingCommand) {
+            updateHand(hand) { it.copy(selectedOledPage = page) }
         }
-        writeGloveCommand(page.command)
+        writeGloveCommand(hand, page.command)
     }
+
+    /** Sends the same command to every connected glove. */
+    fun broadcastCommand(command: String) {
+        _uiState.value.connectedHands.forEach { writeGloveCommand(it.hand, command) }
+    }
+
+    // ---------- Recording (both hands at once) ----------
 
     fun startRecording(label: String) {
         val cleanLabel = label.trim()
@@ -689,7 +732,7 @@ class BleViewModel(application: Application) : AndroidViewModel(application) {
             emitToast("กรุณาใส่ชื่อท่า")
             return
         }
-        if (_uiState.value.status != BleStatus.CONNECTED) {
+        if (!_uiState.value.anyConnected) {
             emitToast("ยังไม่ได้เชื่อมต่อถุงมือ")
             return
         }
@@ -836,7 +879,8 @@ class BleViewModel(application: Application) : AndroidViewModel(application) {
             val result = withContext(Dispatchers.IO) { saveCsv(label, samples) }
             if (result != null) {
                 _uiState.update { it.copy(lastSavedPath = result.path) }
-                emitToast("บันทึก $label แล้ว: ${samples.size} ตัวอย่าง")
+                val hands = samples.map { it.hand }.distinct().joinToString("+") { it.short }
+                emitToast("บันทึก $label แล้ว: ${samples.size} ตัวอย่าง ($hands)")
                 addLog("Saved ${samples.size} samples for '$label' -> ${result.path}")
                 loadDataset(preferredSessionId = datasetSessionId(label, result.session))
             } else {
@@ -856,13 +900,14 @@ class BleViewModel(application: Application) : AndroidViewModel(application) {
             val session = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date())
             FileWriter(file, true).use { writer ->
                 if (isNew) {
-                    writer.appendLine("label,session,t_ms,f1,f2,f3,f4,f5,ax,ay,az,gx,gy,gz")
+                    writer.appendLine("label,session,hand,t_ms,f1,f2,f3,f4,f5,ax,ay,az,gx,gy,gz")
                 }
                 for (s in samples) {
                     writer.appendLine(
                         listOf(
                             label,
                             session,
+                            s.hand.short,
                             s.timestampMs.toString(),
                             s.f1.toString(),
                             s.f2.toString(),
@@ -939,22 +984,40 @@ class BleViewModel(application: Application) : AndroidViewModel(application) {
         var skippedRows = 0
 
         file.useLines { lines ->
-            lines.drop(1).forEach { line ->
+            val iterator = lines.iterator()
+            if (!iterator.hasNext()) return@useLines
+            // Map column names from the header so both the legacy layout (no
+            // `hand` column) and the new dual-hand layout load correctly.
+            val header = parseCsvLine(iterator.next()).map { it.trim().lowercase(Locale.US) }
+            fun col(name: String) = header.indexOf(name)
+            val iLabel = col("label").takeIf { it >= 0 } ?: 0
+            val iSession = col("session").takeIf { it >= 0 } ?: 1
+            val iHand = col("hand")
+            val iTime = col("t_ms")
+            val iF1 = col("f1")
+
+            iterator.forEach { line ->
                 if (line.isBlank()) return@forEach
                 val columns = parseCsvLine(line)
-                if (columns.size < 8) {
-                    skippedRows++
-                    return@forEach
+
+                fun intAt(index: Int): Int? =
+                    columns.getOrNull(index)?.trim()?.toIntOrNull()
+
+                // Resolve flex start: explicit f1 header, else position after t_ms.
+                val timeIndex = if (iTime >= 0) iTime else 2
+                val flexStart = when {
+                    iF1 >= 0 -> iF1
+                    else -> timeIndex + 1
                 }
 
-                val label = columns[0].trim()
-                val session = columns[1].trim()
-                val timestampMs = columns[2].trim().toLongOrNull()
-                val f1 = columns[3].trim().toIntOrNull()
-                val f2 = columns[4].trim().toIntOrNull()
-                val f3 = columns[5].trim().toIntOrNull()
-                val f4 = columns[6].trim().toIntOrNull()
-                val f5 = columns[7].trim().toIntOrNull()
+                val label = columns.getOrNull(iLabel)?.trim().orEmpty()
+                val session = columns.getOrNull(iSession)?.trim().orEmpty()
+                val timestampMs = columns.getOrNull(timeIndex)?.trim()?.toLongOrNull()
+                val f1 = intAt(flexStart)
+                val f2 = intAt(flexStart + 1)
+                val f3 = intAt(flexStart + 2)
+                val f4 = intAt(flexStart + 3)
+                val f5 = intAt(flexStart + 4)
                 if (timestampMs == null || f1 == null || f2 == null ||
                     f3 == null || f4 == null || f5 == null
                 ) {
@@ -962,20 +1025,20 @@ class BleViewModel(application: Application) : AndroidViewModel(application) {
                     return@forEach
                 }
 
-                // IMU columns (ax..gz) are optional so 8-column files written by
-                // older app versions still load, with the IMU defaulting to 0.
-                fun imuColumn(index: Int): Int =
-                    columns.getOrNull(index)?.trim()?.toIntOrNull() ?: 0
+                val hand = if (iHand >= 0) {
+                    Hand.fromShort(columns.getOrNull(iHand)?.trim()) ?: Hand.LEFT
+                } else {
+                    Hand.LEFT
+                }
+
+                fun imu(offset: Int): Int = intAt(flexStart + 5 + offset) ?: 0
 
                 val sample = FlexSample(
                     timestampMs = timestampMs,
-                    f1 = f1,
-                    f2 = f2,
-                    f3 = f3,
-                    f4 = f4,
-                    f5 = f5,
-                    ax = imuColumn(8), ay = imuColumn(9), az = imuColumn(10),
-                    gx = imuColumn(11), gy = imuColumn(12), gz = imuColumn(13)
+                    f1 = f1, f2 = f2, f3 = f3, f4 = f4, f5 = f5,
+                    ax = imu(0), ay = imu(1), az = imu(2),
+                    gx = imu(3), gy = imu(4), gz = imu(5),
+                    hand = hand
                 )
 
                 val id = datasetSessionId(label, session)
@@ -1007,7 +1070,7 @@ class BleViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     private fun datasetSessionId(label: String, session: String): String {
-        return "$session\u001F$label"
+        return "$session$label"
     }
 
     private fun csvEscape(value: String): String {
@@ -1058,8 +1121,6 @@ class BleViewModel(application: Application) : AndroidViewModel(application) {
     fun showPermissionDenied() {
         _uiState.update {
             it.copy(
-                status = if (it.status == BleStatus.CONNECTED) it.status else BleStatus.DISCONNECTED,
-                phase = if (it.status == BleStatus.CONNECTED) it.phase else ConnectionPhase.IDLE,
                 dialog = UiDialog(
                     title = "ต้องอนุญาต Bluetooth",
                     message = "แอปต้องใช้สิทธิ์ Bluetooth เพื่อสแกนและเชื่อมต่อ ESP32. เปิด permission ของแอปแล้วลองใหม่",
@@ -1072,8 +1133,6 @@ class BleViewModel(application: Application) : AndroidViewModel(application) {
     fun showBluetoothOff() {
         _uiState.update {
             it.copy(
-                status = if (it.status == BleStatus.CONNECTED) it.status else BleStatus.DISCONNECTED,
-                phase = if (it.status == BleStatus.CONNECTED) it.phase else ConnectionPhase.IDLE,
                 dialog = UiDialog(
                     title = "Bluetooth ปิดอยู่",
                     message = "เปิด Bluetooth แล้วกด Scan อีกครั้ง",
@@ -1086,8 +1145,6 @@ class BleViewModel(application: Application) : AndroidViewModel(application) {
     fun showBleUnsupported() {
         _uiState.update {
             it.copy(
-                status = BleStatus.DISCONNECTED,
-                phase = ConnectionPhase.IDLE,
                 dialog = UiDialog(
                     title = "เครื่องนี้ไม่รองรับ BLE",
                     message = "ต้องใช้อุปกรณ์ Android ที่รองรับ Bluetooth Low Energy"
@@ -1104,11 +1161,11 @@ class BleViewModel(application: Application) : AndroidViewModel(application) {
         action = DialogAction.OPEN_LOCATION_SETTINGS
     )
 
-    private fun showLocationOff(blocking: Boolean) {
+    private fun showLocationOff() {
         _uiState.update {
             it.copy(
-                status = if (blocking) BleStatus.DISCONNECTED else it.status,
-                phase = if (blocking) ConnectionPhase.IDLE else it.phase,
+                isScanning = false,
+                scanPhase = ConnectionPhase.IDLE,
                 dialog = locationDialog()
             )
         }
@@ -1126,21 +1183,22 @@ class BleViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    private fun startConnectedTickers() {
-        stopConnectedTickers()
-        uptimeJob = viewModelScope.launch {
-            while (_uiState.value.status == BleStatus.CONNECTED) {
-                val seconds = (SystemClock.elapsedRealtime() - connectedAtMillis) / 1000
-                _uiState.update { it.copy(connectedUptimeSeconds = seconds) }
+    private fun startConnectedTickers(hand: Hand) {
+        stopConnectedTickers(hand)
+        val handLink = link(hand)
+        handLink.uptimeJob = viewModelScope.launch {
+            while (handState(hand).status == BleStatus.CONNECTED) {
+                val seconds = (SystemClock.elapsedRealtime() - handLink.connectedAtMillis) / 1000
+                updateHand(hand) { it.copy(connectedUptimeSeconds = seconds) }
                 delay(1000)
             }
         }
-        rssiJob = viewModelScope.launch {
-            while (_uiState.value.status == BleStatus.CONNECTED) {
+        handLink.rssiJob = viewModelScope.launch {
+            while (handState(hand).status == BleStatus.CONNECTED) {
                 if (hasConnectPermission()) {
                     runCatching {
                         @SuppressLint("MissingPermission")
-                        bluetoothGatt?.readRemoteRssi()
+                        handLink.gatt?.readRemoteRssi()
                     }
                 }
                 delay(2000)
@@ -1148,32 +1206,34 @@ class BleViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    private fun startConnectionTimeout(address: String) {
-        connectionTimeoutJob?.cancel()
-        connectionTimeoutJob = viewModelScope.launch {
+    private fun startConnectionTimeout(hand: Hand, address: String) {
+        val handLink = link(hand)
+        handLink.connectionTimeoutJob?.cancel()
+        handLink.connectionTimeoutJob = viewModelScope.launch {
             delay(12000)
-            val state = _uiState.value
+            val state = handState(hand)
             if (state.status == BleStatus.CONNECTING && state.connectedAddress == address) {
-                failConnection("เชื่อมต่อถุงมือไม่สำเร็จภายใน 12 วินาที")
+                failConnection(hand, "เชื่อมต่อ ${hand.label} ไม่สำเร็จภายใน 12 วินาที")
             }
         }
     }
 
-    private fun stopConnectedTickers() {
-        rssiJob?.cancel()
-        uptimeJob?.cancel()
-        connectionTimeoutJob?.cancel()
-        saveTimeoutJob?.cancel()
-        commandTimeoutJob?.cancel()
-        nameConfirmReadJob?.cancel()
-        rssiJob = null
-        uptimeJob = null
-        connectionTimeoutJob = null
-        saveTimeoutJob = null
-        commandTimeoutJob = null
-        nameConfirmReadJob = null
-        pendingWriteKind = null
-        pendingName = null
+    private fun stopConnectedTickers(hand: Hand) {
+        val handLink = link(hand)
+        handLink.rssiJob?.cancel()
+        handLink.uptimeJob?.cancel()
+        handLink.connectionTimeoutJob?.cancel()
+        handLink.saveTimeoutJob?.cancel()
+        handLink.commandTimeoutJob?.cancel()
+        handLink.nameConfirmReadJob?.cancel()
+        handLink.rssiJob = null
+        handLink.uptimeJob = null
+        handLink.connectionTimeoutJob = null
+        handLink.saveTimeoutJob = null
+        handLink.commandTimeoutJob = null
+        handLink.nameConfirmReadJob = null
+        handLink.pendingWriteKind = null
+        handLink.pendingName = null
     }
 
     @SuppressLint("MissingPermission")
@@ -1234,22 +1294,27 @@ class BleViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     private fun scheduleNameReadBack(
+        hand: Hand,
         gatt: BluetoothGatt,
         characteristic: BluetoothGattCharacteristic
     ) {
-        nameConfirmReadJob?.cancel()
-        nameConfirmReadJob = viewModelScope.launch {
+        val handLink = link(hand)
+        handLink.nameConfirmReadJob?.cancel()
+        handLink.nameConfirmReadJob = viewModelScope.launch {
             delay(700)
-            if (_uiState.value.isSavingName && pendingWriteKind == PendingWriteKind.DEVICE_NAME) {
+            if (handState(hand).isSavingName &&
+                handLink.pendingWriteKind == PendingWriteKind.DEVICE_NAME
+            ) {
                 readNameCharacteristic(gatt, characteristic)
             }
         }
     }
 
     @SuppressLint("MissingPermission")
-    private fun writeCharacteristicPayload(payload: ByteArray): Boolean {
-        val gatt = bluetoothGatt
-        val characteristic = nameCharacteristic
+    private fun writeCharacteristicPayload(hand: Hand, payload: ByteArray): Boolean {
+        val handLink = link(hand)
+        val gatt = handLink.gatt
+        val characteristic = handLink.nameCharacteristic
         if (gatt == null || characteristic == null) {
             emitToast("BLE characteristic ยังไม่พร้อม")
             return false
@@ -1293,36 +1358,37 @@ class BleViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    private fun handleCharacteristicPayload(payload: ByteArray?, fromNotification: Boolean) {
+    private fun handleCharacteristicPayload(hand: Hand, payload: ByteArray?, fromNotification: Boolean) {
         if (payload == null || payload.isEmpty()) return
         val text = payload.toString(StandardCharsets.UTF_8).trim()
         if (text.isEmpty()) return
+        val handLink = link(hand)
 
         when {
             fromNotification &&
-                pendingWriteKind == PendingWriteKind.DEVICE_NAME &&
+                handLink.pendingWriteKind == PendingWriteKind.DEVICE_NAME &&
                 text.startsWith("OK:") -> {
                 val newName = text.removePrefix("OK:").trim()
-                confirmDeviceName(newName.ifEmpty { pendingName.orEmpty() })
+                confirmDeviceName(hand, newName.ifEmpty { handLink.pendingName.orEmpty() })
             }
             fromNotification &&
-                pendingWriteKind == PendingWriteKind.DEVICE_NAME &&
+                handLink.pendingWriteKind == PendingWriteKind.DEVICE_NAME &&
                 text.startsWith("ERR:") -> {
                 val reason = text.removePrefix("ERR:").trim()
-                saveTimeoutJob?.cancel()
-                nameConfirmReadJob?.cancel()
-                pendingWriteKind = null
-                pendingName = null
-                _uiState.update { it.copy(isSavingName = false) }
+                handLink.saveTimeoutJob?.cancel()
+                handLink.nameConfirmReadJob?.cancel()
+                handLink.pendingWriteKind = null
+                handLink.pendingName = null
+                updateHand(hand) { it.copy(isSavingName = false) }
                 emitToast("บันทึกไม่สำเร็จ: $reason")
-                addLog("ESP32 rejected name: $reason")
+                addLog("ESP32 rejected name (${hand.short}): $reason")
             }
             fromNotification &&
                 text.startsWith("OK:OLED:", ignoreCase = true) -> {
                 val page = parseOledPageCode(text.substringAfterLast(":"))
                 if (page != null) {
-                    _uiState.update { it.copy(selectedOledPage = page) }
-                    addLog("OLED page confirmed: ${page.command}")
+                    updateHand(hand) { it.copy(selectedOledPage = page) }
+                    addLog("OLED page confirmed (${hand.short}): ${page.command}")
                 } else {
                     addLog("Unknown OLED page ack: $text")
                 }
@@ -1330,23 +1396,23 @@ class BleViewModel(application: Application) : AndroidViewModel(application) {
             fromNotification &&
                 text.startsWith("ERR:BAD_OLED_PAGE", ignoreCase = true) -> {
                 emitToast("เลือกหน้า OLED ไม่สำเร็จ")
-                addLog("ESP32 rejected OLED page")
+                addLog("ESP32 rejected OLED page (${hand.short})")
             }
             text.startsWith("NAME:", ignoreCase = true) -> {
                 val name = text.substringAfter(":").trim()
-                applyDeviceNameRead(name)
+                applyDeviceNameRead(hand, name)
             }
             fromNotification || looksLikeGlovePayload(text) -> {
-                handleGlovePayload(text)
+                handleGlovePayload(hand, text)
             }
             else -> {
-                applyDeviceNameRead(text)
+                applyDeviceNameRead(hand, text)
             }
         }
     }
 
     private fun parseOledPageCode(code: String): OledDisplayPage? {
-        return when (code.trim().uppercase(java.util.Locale.US)) {
+        return when (code.trim().uppercase(Locale.US)) {
             "DASH", "DASHBOARD" -> OledDisplayPage.DASHBOARD
             "TELEM", "TELEMETRY", "FLEX" -> OledDisplayPage.TELEMETRY
             "SYS", "SYSTEM", "STATUS" -> OledDisplayPage.SYSTEM
@@ -1356,27 +1422,29 @@ class BleViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    private fun applyDeviceNameRead(name: String) {
+    private fun applyDeviceNameRead(hand: Hand, name: String) {
         if (name.isEmpty()) return
-        val expectedName = pendingName
+        val handLink = link(hand)
+        val expectedName = handLink.pendingName
         if (
-            pendingWriteKind == PendingWriteKind.DEVICE_NAME &&
+            handLink.pendingWriteKind == PendingWriteKind.DEVICE_NAME &&
             expectedName != null &&
             name == expectedName
         ) {
-            confirmDeviceName(name)
+            confirmDeviceName(hand, name)
             return
         }
-        _uiState.update { it.copy(connectedName = name.take(MaxDeviceNameChars)) }
-        addLog("Name read: $name")
+        updateHand(hand) { it.copy(connectedName = name.take(MaxDeviceNameChars)) }
+        addLog("Name read (${hand.short}): $name")
     }
 
-    private fun confirmDeviceName(name: String) {
-        saveTimeoutJob?.cancel()
-        nameConfirmReadJob?.cancel()
-        pendingWriteKind = null
-        pendingName = null
-        _uiState.update {
+    private fun confirmDeviceName(hand: Hand, name: String) {
+        val handLink = link(hand)
+        handLink.saveTimeoutJob?.cancel()
+        handLink.nameConfirmReadJob?.cancel()
+        handLink.pendingWriteKind = null
+        handLink.pendingName = null
+        updateHand(hand) {
             val nextName = name.ifEmpty { it.connectedName.orEmpty() }.take(MaxDeviceNameChars)
             val resolvedName = nextName.ifEmpty { it.connectedName.orEmpty() }
             it.copy(
@@ -1384,14 +1452,14 @@ class BleViewModel(application: Application) : AndroidViewModel(application) {
                 isSavingName = false
             )
         }
-        emitToast("บันทึกชื่อแล้ว")
-        addLog("ESP32 confirmed name: $name")
+        emitToast("บันทึกชื่อแล้ว (${hand.short})")
+        addLog("ESP32 confirmed name (${hand.short}): $name")
     }
 
-    private fun handleGlovePayload(text: String) {
+    private fun handleGlovePayload(hand: Hand, text: String) {
         val preview = text.take(MaxPayloadPreviewChars)
         var nextCount = 0
-        _uiState.update { state ->
+        updateHand(hand) { state ->
             nextCount = state.glovePacketCount + 1
             state.copy(
                 latestPayload = preview,
@@ -1400,18 +1468,18 @@ class BleViewModel(application: Application) : AndroidViewModel(application) {
             )
         }
         if (nextCount == 1 || nextCount % 20 == 0) {
-            addLog("Glove packets received: $nextCount")
+            addLog("Glove packets (${hand.short}): $nextCount")
         }
 
         if (_uiState.value.recordingState == RecordingState.RECORDING) {
-            parseFlexSample(text)?.let { sample ->
+            parseFlexSample(hand, text)?.let { sample ->
                 recordingBuffer.add(sample)
                 _uiState.update { it.copy(recordingSampleCount = recordingBuffer.size) }
             }
         }
     }
 
-    private fun parseFlexSample(text: String): FlexSample? {
+    private fun parseFlexSample(hand: Hand, text: String): FlexSample? {
         val body = if (text.startsWith("DATA:", ignoreCase = true)) text.substringAfter(":") else text
         val map = body.split(",").mapNotNull { part ->
             val eq = part.indexOf('=')
@@ -1427,14 +1495,14 @@ class BleViewModel(application: Application) : AndroidViewModel(application) {
         return FlexSample(
             timestampMs = t,
             f1 = f1, f2 = f2, f3 = f3, f4 = f4, f5 = f5,
-            // IMU is optional; absent keys (no MPU6050 / older firmware) stay 0.
             ax = map["ax"] ?: 0, ay = map["ay"] ?: 0, az = map["az"] ?: 0,
-            gx = map["gx"] ?: 0, gy = map["gy"] ?: 0, gz = map["gz"] ?: 0
+            gx = map["gx"] ?: 0, gy = map["gy"] ?: 0, gz = map["gz"] ?: 0,
+            hand = hand
         )
     }
 
     private fun looksLikeGlovePayload(text: String): Boolean {
-        val upper = text.uppercase(java.util.Locale.US)
+        val upper = text.uppercase(Locale.US)
         if (
             upper.startsWith("DATA:") ||
             upper.startsWith("SENSOR:") ||
@@ -1447,10 +1515,10 @@ class BleViewModel(application: Application) : AndroidViewModel(application) {
         return hasPayloadSeparator && text.any { it.isDigit() }
     }
 
-    private fun failConnection(message: String) {
-        addLog(message)
+    private fun failConnection(hand: Hand, message: String) {
+        addLog("${hand.short}: $message")
         emitToast(message)
-        disconnect()
+        disconnect(hand)
         _uiState.update {
             it.copy(
                 dialog = UiDialog(
@@ -1461,45 +1529,35 @@ class BleViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    private fun handleDisconnected(lost: Boolean) {
-        connectingAddress = null
-        connectAttempt = 0
-        stopConnectedTickers()
-        closeGatt()
-        _uiState.update {
-            it.copy(
-                status = BleStatus.DISCONNECTED,
-                phase = ConnectionPhase.IDLE,
-                connectedName = null,
-                connectedAddress = null,
-                connectedRssi = null,
-                connectedUptimeSeconds = 0,
-                latestPayload = null,
-                latestPayloadAtMillis = null,
-                glovePacketCount = 0,
-                isSavingName = false,
-                isSendingCommand = false,
-                dialog = if (lost) {
-                    UiDialog(
-                        title = "การเชื่อมต่อหลุด",
+    private fun handleDisconnected(hand: Hand, lost: Boolean) {
+        val handLink = link(hand)
+        handLink.connectingAddress = null
+        handLink.connectAttempt = 0
+        stopConnectedTickers(hand)
+        closeLink(hand)
+        updateHand(hand) { HandConnection(hand) }
+        if (lost) {
+            _uiState.update {
+                it.copy(
+                    dialog = UiDialog(
+                        title = "การเชื่อมต่อหลุด (${hand.label})",
                         message = "ESP32 ตัดการเชื่อมต่อกลางคัน. ตรวจระยะห่าง แบตเตอรี่ และลองเชื่อมต่อใหม่"
                     )
-                } else {
-                    it.dialog
-                }
-            )
+                )
+            }
         }
     }
 
-    private fun closeGatt() {
-        nameCharacteristic = null
+    private fun closeLink(hand: Hand) {
+        val handLink = link(hand)
+        handLink.nameCharacteristic = null
         if (hasConnectPermission()) {
             runCatching {
                 @SuppressLint("MissingPermission")
-                bluetoothGatt?.close()
+                handLink.gatt?.close()
             }
         }
-        bluetoothGatt = null
+        handLink.gatt = null
     }
 
     private fun safeDeviceName(device: BluetoothDevice): String? {
@@ -1541,8 +1599,7 @@ class BleViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     private fun addLog(message: String) {
-        val timestamp = java.text.SimpleDateFormat("HH:mm:ss", java.util.Locale.US)
-            .format(java.util.Date())
+        val timestamp = SimpleDateFormat("HH:mm:ss", Locale.US).format(Date())
         _uiState.update { state ->
             val nextLogs = (state.logs + "$timestamp $message").takeLast(80)
             state.copy(logs = nextLogs)
@@ -1552,7 +1609,7 @@ class BleViewModel(application: Application) : AndroidViewModel(application) {
     override fun onCleared() {
         datasetPlaybackJob?.cancel()
         stopScan()
-        disconnect()
+        disconnectAll()
         super.onCleared()
     }
 

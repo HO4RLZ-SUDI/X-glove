@@ -22,9 +22,9 @@ Arduino sketch for the Android app in this repo.
   - `START`: starts live notifications.
   - `STOP`: stops live notifications.
   - `RATE:<ms>`: sets the telemetry interval (20-1000 ms, persisted).
-  - `STATUS`: replies `OK:STATUS:s=<stream>,r=<rate>,b=<mv>,u=<uptime s>,p=<packets>`
+  - `STATUS`: replies `OK:STATUS:s=<stream>,r=<rate>,b=<mv>,u=<uptime s>,p=<packets>,h=<L|R|->`
     (plus `,i=<imu present 0/1>` when the IMU is enabled and
-    `,l=<oled brightness 0-100>` when the OLED is enabled).
+    `,l=<oled brightness 0-100>` when the OLED is enabled). `h` is the hand tag.
   - `VER`: replies `OK:VER:<firmware version>`.
   - `PING`: replies `OK:PONG`.
   - `OLED:DASH`, `OLED:TELEM`, `OLED:SYS`, `OLED:HAND`, `OLED:WAVE`: switches
@@ -34,6 +34,11 @@ Arduino sketch for the Android app in this repo.
   - `NAME:<name>` (up to 20 chars): saves the BLE device name. This is the only
     way to rename the glove — any other unrecognized write replies
     `ERR:UNKNOWN_COMMAND` (a typo'd command can no longer silently rename it).
+  - `HAND:L` / `HAND:R`: tags this glove as the left or right hand (persisted),
+    and appends `-L` / `-R` to the advertised name so the dual-hand app assigns
+    the correct slot automatically. `HAND:CLEAR` removes the tag. Like `NAME:`,
+    the advertised name changes on the next boot; replies `OK:HAND:<L|R>` or
+    `OK:HAND:CLEAR` (and `ERR:BAD_HAND` for anything else).
 
 Commands received over BLE are queued and executed from `loop()`, so slow work
 (calibration animation, NVS writes) never blocks the BLE stack thread. If a

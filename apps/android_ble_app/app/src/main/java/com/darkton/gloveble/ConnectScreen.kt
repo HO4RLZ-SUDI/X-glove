@@ -51,90 +51,143 @@ fun ConnectScreen(
     onScanClick: () -> Unit,
     onStopScanClick: () -> Unit,
     onConnectClick: (String) -> Unit,
-    onDisconnectClick: () -> Unit,
+    onDisconnectHand: (Hand) -> Unit,
     onGoLive: () -> Unit
 ) {
-    Column(
+    LazyColumn(
         modifier = Modifier
             .fillMaxSize()
-            .background(MaterialTheme.colorScheme.background)
-            .padding(16.dp),
+            .background(MaterialTheme.colorScheme.background),
+        contentPadding = PaddingValues(16.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp)
     ) {
-        if (state.status == BleStatus.CONNECTED) {
-            ConnectedCard(
-                state = state,
-                onDisconnectClick = onDisconnectClick,
+        items(state.hands, key = { it.hand }) { hand ->
+            HandSlotCard(
+                connection = hand,
+                onDisconnect = { onDisconnectHand(hand.hand) },
                 onGoLive = onGoLive
             )
-        } else {
+        }
+
+        item {
             ScanPanel(
                 state = state,
                 onScanClick = onScanClick,
                 onStopScanClick = onStopScanClick
             )
-            DeviceList(
-                state = state,
-                onConnectClick = onConnectClick,
-                modifier = Modifier.weight(1f)
-            )
+        }
+
+        item {
+            DeviceListHeader(count = state.devices.size)
+        }
+
+        if (state.devices.isEmpty()) {
+            item {
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(vertical = 24.dp),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Text(
+                        text = if (state.isScanning) "กำลังค้นหาถุงมือ..." else "กดปุ่มสแกนเพื่อเริ่มค้นหา",
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+            }
+        } else {
+            items(state.devices, key = { it.address }) { device ->
+                val connecting = state.hands.any {
+                    it.status == BleStatus.CONNECTING && it.connectedAddress == device.address
+                }
+                val connectedHere = state.hands.firstOrNull {
+                    it.isConnected && it.connectedAddress == device.address
+                }
+                DeviceRow(
+                    device = device,
+                    connecting = connecting,
+                    connectedHand = connectedHere?.hand,
+                    onConnectClick = onConnectClick
+                )
+            }
         }
     }
 }
 
 @Composable
-private fun ConnectedCard(
-    state: BleUiState,
-    onDisconnectClick: () -> Unit,
+private fun HandSlotCard(
+    connection: HandConnection,
+    onDisconnect: () -> Unit,
     onGoLive: () -> Unit
 ) {
     SectionCard(
-        title = state.connectedName ?: "Glove",
-        subtitle = state.connectedAddress ?: "-",
-        trailing = { SignalBars(rssi = state.connectedRssi) }
+        title = "${connection.hand.label} (${connection.hand.short})",
+        subtitle = when (connection.status) {
+            BleStatus.CONNECTED -> connection.connectedName ?: connection.connectedAddress ?: "Glove"
+            BleStatus.CONNECTING -> "กำลังเชื่อมต่อ..."
+            else -> "ยังไม่ได้เชื่อมต่อ"
+        },
+        trailing = {
+            if (connection.isConnected) SignalBars(rssi = connection.connectedRssi)
+        }
     ) {
         ConnectionVisualizer(
-            state = state,
+            status = connection.status,
+            packetCount = connection.glovePacketCount,
             modifier = Modifier
                 .fillMaxWidth()
-                .height(118.dp)
+                .height(110.dp)
         )
 
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.spacedBy(12.dp)
-        ) {
-            InfoMetric(
-                label = "RSSI",
-                value = state.connectedRssi?.let { "$it dBm" } ?: "--",
-                modifier = Modifier.weight(1f)
+        if (connection.isConnected) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(12.dp)
+            ) {
+                InfoMetric(
+                    label = "RSSI",
+                    value = connection.connectedRssi?.let { "$it dBm" } ?: "--",
+                    modifier = Modifier.weight(1f)
+                )
+                InfoMetric(
+                    label = "Uptime",
+                    value = formatUptime(connection.connectedUptimeSeconds),
+                    modifier = Modifier.weight(1f)
+                )
+                InfoMetric(
+                    label = "Packets",
+                    value = connection.glovePacketCount.toString(),
+                    modifier = Modifier.weight(1f)
+                )
+            }
+            Button(onClick = onGoLive, modifier = Modifier.fillMaxWidth()) {
+                Text("ดูข้อมูล Live")
+            }
+            OutlinedButton(
+                onClick = onDisconnect,
+                modifier = Modifier.fillMaxWidth(),
+                colors = ButtonDefaults.outlinedButtonColors(
+                    contentColor = MaterialTheme.colorScheme.error
+                )
+            ) {
+                Text("ตัด ${connection.hand.label}")
+            }
+        } else if (connection.status == BleStatus.CONNECTING) {
+            OutlinedButton(
+                onClick = onDisconnect,
+                modifier = Modifier.fillMaxWidth(),
+                colors = ButtonDefaults.outlinedButtonColors(
+                    contentColor = MaterialTheme.colorScheme.error
+                )
+            ) {
+                Text("ยกเลิก")
+            }
+        } else {
+            Text(
+                text = "สแกนด้านล่าง แล้วเลือกอุปกรณ์ที่ลงท้ายด้วย ${connection.hand.short} เพื่อจับคู่ช่องนี้",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
             )
-            InfoMetric(
-                label = "Uptime",
-                value = formatUptime(state.connectedUptimeSeconds),
-                modifier = Modifier.weight(1f)
-            )
-            InfoMetric(
-                label = "Packets",
-                value = state.glovePacketCount.toString(),
-                modifier = Modifier.weight(1f)
-            )
-        }
-
-        Button(
-            onClick = onGoLive,
-            modifier = Modifier.fillMaxWidth()
-        ) {
-            Text("ดูข้อมูล Live")
-        }
-        OutlinedButton(
-            onClick = onDisconnectClick,
-            modifier = Modifier.fillMaxWidth(),
-            colors = ButtonDefaults.outlinedButtonColors(
-                contentColor = MaterialTheme.colorScheme.error
-            )
-        ) {
-            Text("ตัดการเชื่อมต่อ")
         }
     }
 }
@@ -147,36 +200,16 @@ private fun ScanPanel(
 ) {
     SectionCard(
         title = "ค้นหาถุงมือ",
-        subtitle = state.phase.label,
+        subtitle = state.scanPhase.label,
         trailing = {
-            if (state.status == BleStatus.SCANNING) {
-                OutlinedButton(onClick = onStopScanClick) {
-                    Text("หยุด")
-                }
+            if (state.isScanning) {
+                OutlinedButton(onClick = onStopScanClick) { Text("หยุด") }
             } else {
-                Button(onClick = onScanClick) {
-                    Text("สแกน")
-                }
+                Button(onClick = onScanClick) { Text("สแกน") }
             }
         }
     ) {
-        ConnectionVisualizer(
-            state = state,
-            modifier = Modifier
-                .fillMaxWidth()
-                .height(118.dp)
-        )
-
-        AnimatedVisibility(visible = state.status == BleStatus.CONNECTING) {
-            Text(
-                text = "กำลังเชื่อมต่อ ${state.connectedName ?: "ถุงมือ"}",
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis
-            )
-        }
-        AnimatedVisibility(visible = state.status == BleStatus.SCANNING && state.devices.isEmpty()) {
+        AnimatedVisibility(visible = state.isScanning && state.devices.isEmpty()) {
             Text(
                 text = "กำลังค้นหาอุปกรณ์ชื่อ ESP32, Glove, SmartGlove...",
                 style = MaterialTheme.typography.bodySmall,
@@ -190,7 +223,8 @@ private fun ScanPanel(
 
 @Composable
 fun ConnectionVisualizer(
-    state: BleUiState,
+    status: BleStatus,
+    packetCount: Int,
     modifier: Modifier = Modifier
 ) {
     val transition = rememberInfiniteTransition(label = "connectionVisualizer")
@@ -204,7 +238,7 @@ fun ConnectionVisualizer(
         label = "connectionLoop"
     )
     val linkProgress by animateFloatAsState(
-        targetValue = when (state.status) {
+        targetValue = when (status) {
             BleStatus.CONNECTED -> 1f
             BleStatus.CONNECTING -> 0.62f + loop * 0.32f
             else -> 0f
@@ -223,14 +257,14 @@ fun ConnectionVisualizer(
         val centerY = size.height * 0.54f
         val phone = Offset(size.width * 0.28f, centerY)
         val glove = Offset(size.width * 0.72f, centerY)
-        val activeColor = when (state.status) {
+        val activeColor = when (status) {
             BleStatus.SCANNING -> secondary
             BleStatus.CONNECTING -> tertiary
             BleStatus.CONNECTED -> primary
             BleStatus.DISCONNECTED -> outline
         }
 
-        if (state.status == BleStatus.SCANNING) {
+        if (status == BleStatus.SCANNING) {
             repeat(3) { index ->
                 val ring = (loop + index / 3f) % 1f
                 drawCircle(
@@ -249,7 +283,7 @@ fun ConnectionVisualizer(
             end = glove,
             strokeWidth = stroke
         )
-        if (state.status == BleStatus.CONNECTING || state.status == BleStatus.CONNECTED) {
+        if (status == BleStatus.CONNECTING || status == BleStatus.CONNECTED) {
             drawLine(
                 color = activeColor,
                 start = phone,
@@ -282,7 +316,7 @@ fun ConnectionVisualizer(
         val palmWidth = 42.dp.toPx()
         val palmHeight = 38.dp.toPx()
         drawRoundRect(
-            color = activeColor.copy(alpha = if (state.status == BleStatus.DISCONNECTED) 0.35f else 0.88f),
+            color = activeColor.copy(alpha = if (status == BleStatus.DISCONNECTED) 0.35f else 0.88f),
             topLeft = Offset(glove.x - palmWidth / 2f, glove.y - palmHeight / 3f),
             size = Size(palmWidth, palmHeight),
             cornerRadius = CornerRadius(12.dp.toPx(), 12.dp.toPx())
@@ -291,15 +325,15 @@ fun ConnectionVisualizer(
             val fingerX = glove.x - 18.dp.toPx() + index * 9.dp.toPx()
             val height = (22 + (index % 2) * 6).dp.toPx()
             drawRoundRect(
-                color = activeColor.copy(alpha = if (state.status == BleStatus.DISCONNECTED) 0.3f else 0.95f),
+                color = activeColor.copy(alpha = if (status == BleStatus.DISCONNECTED) 0.3f else 0.95f),
                 topLeft = Offset(fingerX, glove.y - palmHeight / 3f - height + 4.dp.toPx()),
                 size = Size(6.dp.toPx(), height),
                 cornerRadius = CornerRadius(4.dp.toPx(), 4.dp.toPx())
             )
         }
 
-        if (state.status == BleStatus.CONNECTED) {
-            val packetPulse = if (state.glovePacketCount > 0) 0.32f + 0.28f * (1f - loop) else 0.16f
+        if (status == BleStatus.CONNECTED) {
+            val packetPulse = if (packetCount > 0) 0.32f + 0.28f * (1f - loop) else 0.16f
             drawCircle(
                 color = primary.copy(alpha = packetPulse),
                 radius = 42.dp.toPx() + loop * 16.dp.toPx(),
@@ -311,87 +345,37 @@ fun ConnectionVisualizer(
 }
 
 @Composable
-private fun DeviceList(
-    state: BleUiState,
-    onConnectClick: (String) -> Unit,
-    modifier: Modifier = Modifier
-) {
-    Surface(
-        modifier = modifier.fillMaxWidth(),
-        shape = MaterialTheme.shapes.large,
-        color = MaterialTheme.colorScheme.surface,
-        tonalElevation = 2.dp
+private fun DeviceListHeader(count: Int) {
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        verticalAlignment = Alignment.CenterVertically
     ) {
-        Column {
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(16.dp),
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Text(
-                    text = "อุปกรณ์ที่พบ",
-                    style = MaterialTheme.typography.titleMedium,
-                    fontWeight = FontWeight.SemiBold
-                )
-                Spacer(Modifier.weight(1f))
-                Text(
-                    text = "${state.devices.size}",
-                    style = MaterialTheme.typography.labelLarge,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
-            }
-
-            HorizontalDivider()
-
-            if (state.devices.isEmpty()) {
-                Box(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .weight(1f),
-                    contentAlignment = Alignment.Center
-                ) {
-                    Text(
-                        text = if (state.status == BleStatus.SCANNING) {
-                            "กำลังค้นหาถุงมือ..."
-                        } else {
-                            "กดปุ่มสแกนเพื่อเริ่มค้นหา"
-                        },
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                }
-            } else {
-                LazyColumn(
-                    modifier = Modifier.weight(1f)
-                ) {
-                    items(
-                        items = state.devices,
-                        key = { it.address }
-                    ) { device ->
-                        DeviceRow(
-                            device = device,
-                            connecting = state.status == BleStatus.CONNECTING &&
-                                state.connectedAddress == device.address,
-                            onConnectClick = onConnectClick
-                        )
-                        HorizontalDivider()
-                    }
-                }
-            }
-        }
+        Text(
+            text = "อุปกรณ์ที่พบ",
+            style = MaterialTheme.typography.titleMedium,
+            fontWeight = FontWeight.SemiBold
+        )
+        Spacer(Modifier.weight(1f))
+        Text(
+            text = "$count",
+            style = MaterialTheme.typography.labelLarge,
+            color = MaterialTheme.colorScheme.onSurfaceVariant
+        )
     }
+    HorizontalDivider(modifier = Modifier.padding(top = 8.dp))
 }
 
 @Composable
 private fun DeviceRow(
     device: BleDeviceItem,
     connecting: Boolean,
+    connectedHand: Hand?,
     onConnectClick: (String) -> Unit
 ) {
     Column(
         modifier = Modifier
             .fillMaxWidth()
-            .padding(horizontal = 16.dp, vertical = 12.dp),
+            .padding(vertical = 12.dp),
         verticalArrangement = Arrangement.spacedBy(10.dp)
     ) {
         Row(verticalAlignment = Alignment.CenterVertically) {
@@ -433,10 +417,11 @@ private fun DeviceRow(
             if (device.isLikelyGlove) {
                 DeviceBadge("glove")
             }
+            connectedHand?.let { DeviceBadge("ใช้เป็น ${it.short}") }
             Spacer(Modifier.weight(1f))
             Button(
                 onClick = { onConnectClick(device.address) },
-                enabled = !connecting,
+                enabled = !connecting && connectedHand == null,
                 modifier = Modifier.widthIn(min = 112.dp),
                 contentPadding = PaddingValues(horizontal = 14.dp, vertical = 9.dp)
             ) {
@@ -447,10 +432,11 @@ private fun DeviceRow(
                         color = MaterialTheme.colorScheme.onPrimary
                     )
                 } else {
-                    Text("เชื่อมต่อ")
+                    Text(if (connectedHand != null) "เชื่อมแล้ว" else "เชื่อมต่อ")
                 }
             }
         }
+        HorizontalDivider()
     }
 }
 

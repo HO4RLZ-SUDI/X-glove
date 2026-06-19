@@ -51,9 +51,9 @@ import androidx.compose.ui.unit.dp
 fun SettingsScreen(
     state: BleUiState,
     themeController: ThemeController,
-    onSaveNameClick: (String) -> Unit,
-    onSendCommandClick: (String) -> Unit,
-    onDisconnectClick: () -> Unit,
+    onSaveNameClick: (Hand, String) -> Unit,
+    onSendCommandClick: (Hand, String) -> Unit,
+    onDisconnectAll: () -> Unit,
     onToggleLogs: () -> Unit
 ) {
     LazyColumn(
@@ -67,12 +67,18 @@ fun SettingsScreen(
             ThemeCard(controller = themeController)
         }
 
-        if (state.status == BleStatus.CONNECTED) {
-            item {
-                DeviceNameCard(state = state, onSaveNameClick = onSaveNameClick)
+        if (state.anyConnected) {
+            items(state.connectedHands, key = { it.hand }) { hand ->
+                DeviceNameCard(
+                    connection = hand,
+                    onSaveNameClick = { name -> onSaveNameClick(hand.hand, name) }
+                )
             }
-            item {
-                CommandConsoleCard(state = state, onSendCommandClick = onSendCommandClick)
+            items(state.connectedHands, key = { "cmd-${it.hand}" }) { hand ->
+                CommandConsoleCard(
+                    connection = hand,
+                    onSendCommandClick = { cmd -> onSendCommandClick(hand.hand, cmd) }
+                )
             }
         } else {
             item {
@@ -98,16 +104,16 @@ fun SettingsScreen(
             }
         }
 
-        if (state.status == BleStatus.CONNECTED) {
+        if (state.anyConnected) {
             item {
                 OutlinedButton(
-                    onClick = onDisconnectClick,
+                    onClick = onDisconnectAll,
                     modifier = Modifier.fillMaxWidth(),
                     colors = ButtonDefaults.outlinedButtonColors(
                         contentColor = MaterialTheme.colorScheme.error
                     )
                 ) {
-                    Text("ตัดการเชื่อมต่อถุงมือ")
+                    Text("ตัดการเชื่อมต่อทุกถุงมือ")
                 }
             }
         }
@@ -275,16 +281,16 @@ private fun AccentSwatch(
 
 @Composable
 private fun DeviceNameCard(
-    state: BleUiState,
+    connection: HandConnection,
     onSaveNameClick: (String) -> Unit
 ) {
-    var deviceName by remember(state.connectedName) {
-        mutableStateOf(state.connectedName.orEmpty().take(MaxDeviceNameChars))
+    var deviceName by remember(connection.connectedName) {
+        mutableStateOf(connection.connectedName.orEmpty().take(MaxDeviceNameChars))
     }
 
     SectionCard(
-        title = "ชื่อถุงมือ",
-        subtitle = "ชื่อที่ใช้ตอน advertise ผ่าน BLE"
+        title = "ชื่อถุงมือ — ${connection.hand.label}",
+        subtitle = "ลงท้ายด้วย ${connection.hand.short} เพื่อให้แอปจับคู่ช่องนี้อัตโนมัติ"
     ) {
         OutlinedTextField(
             value = deviceName,
@@ -304,10 +310,10 @@ private fun DeviceNameCard(
 
         Button(
             onClick = { onSaveNameClick(deviceName) },
-            enabled = !state.isSavingName,
+            enabled = !connection.isSavingName,
             modifier = Modifier.fillMaxWidth()
         ) {
-            if (state.isSavingName) {
+            if (connection.isSavingName) {
                 CircularProgressIndicator(
                     modifier = Modifier.size(18.dp),
                     strokeWidth = 2.dp,
@@ -322,13 +328,13 @@ private fun DeviceNameCard(
 
 @Composable
 private fun CommandConsoleCard(
-    state: BleUiState,
+    connection: HandConnection,
     onSendCommandClick: (String) -> Unit
 ) {
     var command by remember { mutableStateOf("") }
 
     SectionCard(
-        title = "ส่งคำสั่งเอง",
+        title = "ส่งคำสั่งเอง — ${connection.hand.label}",
         subtitle = "สำหรับผู้ใช้ขั้นสูง เช่น OLED:WAVE, BRIGHT:50, CAL"
     ) {
         Row(
@@ -353,11 +359,11 @@ private fun CommandConsoleCard(
             )
             Button(
                 onClick = { onSendCommandClick(command) },
-                enabled = command.isNotBlank() && !state.isSendingCommand,
+                enabled = command.isNotBlank() && !connection.isSendingCommand,
                 modifier = Modifier.defaultMinSize(minWidth = 84.dp),
                 contentPadding = PaddingValues(horizontal = 14.dp, vertical = 10.dp)
             ) {
-                if (state.isSendingCommand) {
+                if (connection.isSendingCommand) {
                     CircularProgressIndicator(
                         modifier = Modifier.size(18.dp),
                         strokeWidth = 2.dp,

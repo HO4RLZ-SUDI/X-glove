@@ -32,27 +32,24 @@ import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 
 @Composable
 fun LiveScreen(
     state: BleUiState,
-    onSendCommandClick: (String) -> Unit,
-    onSelectOledPage: (OledDisplayPage) -> Unit,
+    onSendCommandClick: (Hand, String) -> Unit,
+    onSelectOledPage: (Hand, OledDisplayPage) -> Unit,
     onGoConnect: () -> Unit
 ) {
-    if (state.status != BleStatus.CONNECTED) {
+    val connected = state.connectedHands
+    if (connected.isEmpty()) {
         NotConnectedPlaceholder(
             message = "เชื่อมต่อถุงมือก่อน เพื่อดูข้อมูลนิ้วมือแบบเรียลไทม์",
             onGoConnect = onGoConnect
         )
         return
-    }
-
-    val live = remember(state.latestPayload) { parseLiveGloveData(state.latestPayload) }
-    val payloadAgeSeconds = state.latestPayloadAtMillis?.let {
-        ((SystemClock.elapsedRealtime() - it) / 1000).coerceAtLeast(0)
     }
 
     LazyColumn(
@@ -62,174 +59,144 @@ fun LiveScreen(
         contentPadding = PaddingValues(16.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp)
     ) {
-        item {
-            SectionCard(
-                title = "มือเสมือน",
-                subtitle = "นิ้วงอตามเซ็นเซอร์จริง",
-                trailing = { BatteryBadge(batteryMv = live?.batteryMv) }
-            ) {
-                HandVisualizer(
-                    levels = live?.flex?.map { flexPercent(it) } ?: List(FlexChannels) { 0 },
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .height(190.dp)
+        connected.forEach { connection ->
+            item(key = "hand-${connection.hand}") {
+                HandLiveSection(
+                    connection = connection,
+                    onSendCommandClick = { cmd -> onSendCommandClick(connection.hand, cmd) },
+                    onSelectOledPage = { page -> onSelectOledPage(connection.hand, page) }
                 )
             }
         }
+    }
+}
 
-        item {
-            SectionCard(title = "Flex sensors") {
-                for (index in 0 until FlexChannels) {
-                    FlexMeterRow(index = index, value = live?.flex?.getOrNull(index))
-                }
-            }
+@Composable
+private fun HandLiveSection(
+    connection: HandConnection,
+    onSendCommandClick: (String) -> Unit,
+    onSelectOledPage: (OledDisplayPage) -> Unit
+) {
+    val live = remember(connection.latestPayload) { parseLiveGloveData(connection.latestPayload) }
+    val payloadAgeSeconds = connection.latestPayloadAtMillis?.let {
+        ((SystemClock.elapsedRealtime() - it) / 1000).coerceAtLeast(0)
+    }
+
+    SectionCard(
+        title = "${connection.hand.label} — ${connection.connectedName ?: "Glove"}",
+        subtitle = "นิ้วงอตามเซ็นเซอร์จริง",
+        trailing = { BatteryBadge(batteryMv = live?.batteryMv) }
+    ) {
+        HandVisualizer(
+            levels = live?.flex?.map { flexPercent(it) } ?: List(FlexChannels) { 0 },
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(170.dp)
+        )
+
+        for (index in 0 until FlexChannels) {
+            FlexMeterRow(index = index, value = live?.flex?.getOrNull(index))
         }
 
-        item {
-            SectionCard(
-                title = "การเคลื่อนไหว (IMU)",
-                subtitle = "accel เป็น g, gyro เป็น °/s"
-            ) {
-                val imu = live?.imu
-                if (imu == null) {
-                    Text(
-                        text = "ไม่มีข้อมูล IMU — ตรวจว่าต่อ MPU6050 แล้ว",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                } else {
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .horizontalScroll(rememberScrollState()),
-                        horizontalArrangement = Arrangement.spacedBy(8.dp)
-                    ) {
-                        PayloadChip("aX", "%+.2f".format(accelG(imu.ax)))
-                        PayloadChip("aY", "%+.2f".format(accelG(imu.ay)))
-                        PayloadChip("aZ", "%+.2f".format(accelG(imu.az)))
-                    }
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .horizontalScroll(rememberScrollState()),
-                        horizontalArrangement = Arrangement.spacedBy(8.dp)
-                    ) {
-                        PayloadChip("gX", "%+.0f".format(gyroDps(imu.gx)))
-                        PayloadChip("gY", "%+.0f".format(gyroDps(imu.gy)))
-                        PayloadChip("gZ", "%+.0f".format(gyroDps(imu.gz)))
-                    }
-                }
-            }
-        }
-
-        item {
+        val imu = live?.imu
+        if (imu != null) {
             Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(12.dp)
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .horizontalScroll(rememberScrollState()),
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
             ) {
-                InfoMetric(
-                    label = "Packets",
-                    value = state.glovePacketCount.toString(),
-                    modifier = Modifier.weight(1f)
-                )
-                InfoMetric(
-                    label = "ล่าสุด",
-                    value = payloadAgeSeconds?.let { "${it}s" } ?: "--",
-                    modifier = Modifier.weight(1f)
-                )
-                InfoMetric(
-                    label = "RSSI",
-                    value = state.connectedRssi?.let { "$it dBm" } ?: "--",
-                    modifier = Modifier.weight(1f)
-                )
+                PayloadChip("aX", "%+.2f".format(accelG(imu.ax)))
+                PayloadChip("aY", "%+.2f".format(accelG(imu.ay)))
+                PayloadChip("aZ", "%+.2f".format(accelG(imu.az)))
+                PayloadChip("gX", "%+.0f".format(gyroDps(imu.gx)))
+                PayloadChip("gY", "%+.0f".format(gyroDps(imu.gy)))
+                PayloadChip("gZ", "%+.0f".format(gyroDps(imu.gz)))
             }
         }
 
-        item {
-            SectionCard(
-                title = "ควบคุมถุงมือ",
-                subtitle = "ส่งคำสั่งด่วนและเปลี่ยนหน้าจอ OLED"
-            ) {
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .horizontalScroll(rememberScrollState()),
-                    horizontalArrangement = Arrangement.spacedBy(8.dp)
-                ) {
-                    QuickCommandButton("เริ่มสตรีม", "START", state, onSendCommandClick)
-                    QuickCommandButton("หยุดสตรีม", "STOP", state, onSendCommandClick)
-                    QuickCommandButton("คาลิเบรต", "CAL", state, onSendCommandClick)
-                    QuickCommandButton("Ping", "PING", state, onSendCommandClick)
-                }
-
-                Text(
-                    text = "หน้าจอ OLED บนถุงมือ",
-                    style = MaterialTheme.typography.labelLarge,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .horizontalScroll(rememberScrollState()),
-                    horizontalArrangement = Arrangement.spacedBy(8.dp)
-                ) {
-                    OledDisplayPage.entries.forEach { page ->
-                        val selected = state.selectedOledPage == page
-                        if (selected) {
-                            Button(
-                                onClick = { onSelectOledPage(page) },
-                                enabled = !state.isSendingCommand && !state.isSavingName,
-                                contentPadding = PaddingValues(horizontal = 14.dp, vertical = 8.dp)
-                            ) {
-                                Text(page.label)
-                            }
-                        } else {
-                            OutlinedButton(
-                                onClick = { onSelectOledPage(page) },
-                                enabled = !state.isSendingCommand && !state.isSavingName,
-                                contentPadding = PaddingValues(horizontal = 14.dp, vertical = 8.dp)
-                            ) {
-                                Text(page.label)
-                            }
-                        }
-                    }
-                }
-
-                OledBrightnessControl(
-                    enabled = !state.isSendingCommand && !state.isSavingName,
-                    onSetBrightness = { percent -> onSendCommandClick("BRIGHT:$percent") }
-                )
-            }
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(12.dp)
+        ) {
+            InfoMetric(
+                label = "Packets",
+                value = connection.glovePacketCount.toString(),
+                modifier = Modifier.weight(1f)
+            )
+            InfoMetric(
+                label = "ล่าสุด",
+                value = payloadAgeSeconds?.let { "${it}s" } ?: "--",
+                modifier = Modifier.weight(1f)
+            )
+            InfoMetric(
+                label = "RSSI",
+                value = connection.connectedRssi?.let { "$it dBm" } ?: "--",
+                modifier = Modifier.weight(1f)
+            )
         }
 
-        item {
-            SectionCard(title = "ข้อมูลดิบ") {
-                Text(
-                    text = state.latestPayload ?: "รอข้อมูลจากถุงมือ...",
-                    modifier = Modifier.heightIn(min = 40.dp),
-                    style = MaterialTheme.typography.bodySmall,
-                    color = if (state.latestPayload == null) {
-                        MaterialTheme.colorScheme.onSurfaceVariant
-                    } else {
-                        MaterialTheme.colorScheme.onSurface
-                    },
-                    fontFamily = if (state.latestPayload == null) null else FontFamily.Monospace
-                )
-                val payloadValues = parsePayloadValues(state.latestPayload)
-                if (payloadValues.isNotEmpty()) {
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .horizontalScroll(rememberScrollState()),
-                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .horizontalScroll(rememberScrollState()),
+            horizontalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            QuickCommandButton("เริ่มสตรีม", "START", connection, onSendCommandClick)
+            QuickCommandButton("หยุดสตรีม", "STOP", connection, onSendCommandClick)
+            QuickCommandButton("คาลิเบรต", "CAL", connection, onSendCommandClick)
+            QuickCommandButton("Ping", "PING", connection, onSendCommandClick)
+        }
+
+        Text(
+            text = "หน้าจอ OLED",
+            style = MaterialTheme.typography.labelLarge,
+            color = MaterialTheme.colorScheme.onSurfaceVariant
+        )
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .horizontalScroll(rememberScrollState()),
+            horizontalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            OledDisplayPage.entries.forEach { page ->
+                val selected = connection.selectedOledPage == page
+                if (selected) {
+                    Button(
+                        onClick = { onSelectOledPage(page) },
+                        enabled = !connection.isBusy,
+                        contentPadding = PaddingValues(horizontal = 14.dp, vertical = 8.dp)
                     ) {
-                        payloadValues.forEach { value ->
-                            PayloadChip(label = value.label, value = value.value)
-                        }
+                        Text(page.label)
+                    }
+                } else {
+                    OutlinedButton(
+                        onClick = { onSelectOledPage(page) },
+                        enabled = !connection.isBusy,
+                        contentPadding = PaddingValues(horizontal = 14.dp, vertical = 8.dp)
+                    ) {
+                        Text(page.label)
                     }
                 }
             }
         }
+
+        OledBrightnessControl(
+            enabled = !connection.isBusy,
+            onSetBrightness = { percent -> onSendCommandClick("BRIGHT:$percent") }
+        )
+
+        Text(
+            text = connection.latestPayload ?: "รอข้อมูลจากถุงมือ...",
+            modifier = Modifier.heightIn(min = 36.dp),
+            style = MaterialTheme.typography.bodySmall,
+            color = if (connection.latestPayload == null) {
+                MaterialTheme.colorScheme.onSurfaceVariant
+            } else {
+                MaterialTheme.colorScheme.onSurface
+            },
+            fontFamily = if (connection.latestPayload == null) null else FontFamily.Monospace
+        )
     }
 }
 
@@ -271,12 +238,12 @@ private fun OledBrightnessControl(
 private fun QuickCommandButton(
     label: String,
     command: String,
-    state: BleUiState,
+    connection: HandConnection,
     onSendCommandClick: (String) -> Unit
 ) {
     OutlinedButton(
         onClick = { onSendCommandClick(command) },
-        enabled = !state.isSendingCommand,
+        enabled = !connection.isSendingCommand,
         contentPadding = PaddingValues(horizontal = 14.dp, vertical = 8.dp)
     ) {
         Text(label)
@@ -310,7 +277,6 @@ fun HandVisualizer(levels: List<Int>, modifier: Modifier = Modifier) {
 
         for (index in 0 until fingerCount) {
             val x = palmLeft + index * fingerWidth * 2f
-            // Track showing full finger extent.
             drawRoundRect(
                 color = track,
                 topLeft = Offset(x, palmTop - maxFingerHeight),

@@ -113,6 +113,10 @@ BLEServer* bleServer = nullptr;
 BLECharacteristic* gloveCharacteristic = nullptr;
 
 String deviceName;
+// Which hand this glove is, for the dual-hand Android app. 0 = unset, 'L', 'R'.
+// The app assigns the left/right slot from the advertised BLE name, so when this
+// is set the side is appended to the advertised name (e.g. "Glove-ESP32-L").
+char gloveHand = 0;
 bool deviceConnected = false;
 bool oldDeviceConnected = false;
 bool streaming = true;
@@ -309,6 +313,29 @@ static void saveDeviceName(const String& nextName) {
     deviceName = nextName.substring(0, MAX_DEVICE_NAME_CHARS);
     prefs.putString("name", deviceName);
     notifyText("OK:" + deviceName);
+}
+
+// The name the glove advertises. With a hand set, the side is appended so the
+// Android app's name-based hand detection ("...-L" / "...-R") assigns the right
+// slot automatically. Capped so the composed name still fits the scan response.
+static String advertisedName() {
+    if (gloveHand != 'L' && gloveHand != 'R') {
+        return deviceName;
+    }
+    String base = deviceName.substring(0, MAX_DEVICE_NAME_CHARS - 2);
+    return base + "-" + String(gloveHand);
+}
+
+static void saveHand(char hand) {
+    gloveHand = hand; // 0 to clear, or 'L' / 'R'
+    prefs.putUChar("hand", static_cast<uint8_t>(gloveHand));
+    if (gloveHand == 'L' || gloveHand == 'R') {
+        // The advertised name only changes on the next boot (same as NAME:), so
+        // tell the app the side is stored and a restart applies it.
+        notifyText(String("OK:HAND:") + gloveHand);
+    } else {
+        notifyText("OK:HAND:CLEAR");
+    }
 }
 
 static void calibrateFlexBaseline() {
@@ -600,7 +627,7 @@ static void renderSystemPage(const TelemetrySnapshot& snapshot) {
     oled.print("v" FW_VERSION);
     oled.drawHLine(0, 11, 128);
 
-    drawSystemLine(22, "Name", deviceName);
+    drawSystemLine(22, "Name", advertisedName());
     drawSystemLine(32, "BLE", deviceConnected ? "Connected" : "Advertising");
     drawSystemLine(42, "Stream", streaming
         ? (String("On @") + String(telemetryIntervalMs) + "ms")
@@ -932,6 +959,8 @@ static void sendStatus() {
     status += String(millis() / 1000);
     status += ",p=";
     status += String(telemetryPacketCount);
+    status += ",h=";
+    status += (gloveHand == 'L' || gloveHand == 'R') ? String(gloveHand) : String("-");
 #if GLOVE_ENABLE_IMU
     status += ",i=";
     status += imuReady ? "1" : "0";
@@ -1029,6 +1058,21 @@ static void processCommand(const String& rawValue) {
         return;
     }
 
+    if (upper.startsWith("HAND:")) {
+        String arg = trimCommand(value.substring(5));
+        arg.toUpperCase();
+        if (arg == "L" || arg == "LEFT") {
+            saveHand('L');
+        } else if (arg == "R" || arg == "RIGHT") {
+            saveHand('R');
+        } else if (arg == "CLEAR" || arg == "NONE" || arg == "0") {
+            saveHand(0);
+        } else {
+            notifyText("ERR:BAD_HAND");
+        }
+        return;
+    }
+
     // Previously any short unrecognized string was silently saved as the device
     // name, so a typo'd command (e.g. "STAT") quietly renamed the glove. Names
     // must now go through "NAME:" explicitly; everything else is an error.
@@ -1077,6 +1121,9 @@ static void loadSettings() {
         deviceName = DEFAULT_DEVICE_NAME;
     }
 
+    uint8_t storedHand = prefs.getUChar("hand", 0);
+    gloveHand = (storedHand == 'L' || storedHand == 'R') ? static_cast<char>(storedHand) : 0;
+
     for (int i = 0; i < FLEX_COUNT; i++) {
         flexBaseline[i] = prefs.getUShort(("z" + String(i)).c_str(), 0);
     }
@@ -1092,7 +1139,7 @@ static void loadSettings() {
 }
 
 static void startBle() {
-    BLEDevice::init(deviceName.c_str());
+    BLEDevice::init(advertisedName().c_str());
     // Larger MTU so a full flex + IMU + battery + counter packet fits in one
     // notification (ATT payload = MTU - 3). The app requests the same value.
     BLEDevice::setMTU(185);
