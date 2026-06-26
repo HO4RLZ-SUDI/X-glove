@@ -126,6 +126,7 @@ class MainActivity : ComponentActivity() {
                     onSelectOledPage = viewModel::selectOledPage,
                     onStartRecording = viewModel::startRecording,
                     onCancelRecording = viewModel::cancelRecording,
+                    onToggleRecognition = viewModel::toggleRecognition,
                     onRefreshDataset = viewModel::refreshDataset,
                     onSelectDatasetSession = viewModel::selectDatasetSession,
                     onPlayDataset = viewModel::playDatasetSession,
@@ -207,6 +208,7 @@ private fun GloveApp(
     onSelectOledPage: (Hand, OledDisplayPage) -> Unit,
     onStartRecording: (String) -> Unit,
     onCancelRecording: () -> Unit,
+    onToggleRecognition: () -> Unit,
     onRefreshDataset: () -> Unit,
     onSelectDatasetSession: (String) -> Unit,
     onPlayDataset: () -> Unit,
@@ -264,6 +266,7 @@ private fun GloveApp(
                     state = state,
                     onSendCommandClick = onSendCommandClick,
                     onSelectOledPage = onSelectOledPage,
+                    onToggleRecognition = onToggleRecognition,
                     onGoConnect = { tabIndex = AppTab.CONNECT.ordinal }
                 )
                 AppTab.RECORD -> RecordScreen(

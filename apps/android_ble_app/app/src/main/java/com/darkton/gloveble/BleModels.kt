@@ -124,7 +124,11 @@ data class HandConnection(
     val glovePacketCount: Int = 0,
     val selectedOledPage: OledDisplayPage = OledDisplayPage.DASHBOARD,
     val isSavingName: Boolean = false,
-    val isSendingCommand: Boolean = false
+    val isSendingCommand: Boolean = false,
+    /** Last confidently recognized sign for this hand (null until one is found). */
+    val recognizedWord: String? = null,
+    /** Live recognition confidence 0..1 for the most recent reading. */
+    val recognitionConfidence: Float = 0f
 ) {
     val isConnected: Boolean get() = status == BleStatus.CONNECTED
     val isBusy: Boolean get() = isSavingName || isSendingCommand
@@ -149,7 +153,11 @@ data class BleUiState(
     val datasetPlaybackPlaying: Boolean = false,
     val datasetCsvPath: String? = null,
     val datasetMessage: String? = null,
-    val isDatasetLoading: Boolean = false
+    val isDatasetLoading: Boolean = false,
+    /** When on, live packets are classified into signs on the Live screen. */
+    val recognitionEnabled: Boolean = false,
+    /** How many distinct signs the recognizer can currently tell apart. */
+    val recognizerLabelCount: Int = 0
 ) {
     fun hand(h: Hand): HandConnection = if (h == Hand.LEFT) left else right
 

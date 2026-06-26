@@ -21,12 +21,15 @@ part = "preview";          // "base" | "lid" | "preview" | "section"
 $fn = 64;
 
 // ---- Outer shell (squircle "pillow" form, like the reference) -------------
-W          = 43;           // width  (X)  — ref 43.4
-L          = 49;           // length (Y)  — ref 49.0, the wrist proximal-distal axis
-case_h     = 21;           // thickness (Z). Ref is 14.4 (a solid styling shell);
-                           // raised to actually hold 502535 + ESP32-C3 + 1.3"
-                           // OLED. The pillow form below makes it *read* thinner
-                           // than a 21mm box. Drop to ~16 with 302030 + 0.96".
+W          = 48;           // width  (X)  — grown from ref 43.4 to floor the LiPo
+                           // compartment (-X) beside the ESP32 + charge module (+X)
+L          = 55;           // length (Y)  — grown from ref 49.0 so the +X column fits
+                           // the ESP32 and the Type-C charge module end-to-end
+case_h     = 23;           // thickness (Z). Ref is 14.4 (a solid styling shell);
+                           // raised to hold the 6mm LiPo + ESP32-C3 + 1.3" OLED +
+                           // a thin flex-divider perfboard stacked over the battery.
+                           // The pillow form makes it read thinner than a box.
+                           // Drop to ~16 with 302030 + 0.96" and no perfboard.
 corner_r   = 10;           // squircle corner radius (ref ~10)
 
 // Pillow profile (this is the redesign — replaces the old flat-top box):
@@ -34,7 +37,7 @@ corner_r   = 10;           // squircle corner radius (ref ~10)
 // (top, back, and the vertical corners) is filleted into one smooth "pillow"
 // like the reference — with flat vertical side walls (clean, uniform shell).
 edge_r     = 4.0;          // 3D fillet radius on all outer edges (the pillow)
-lid_cap    = 6.0;          // height of the top cap = the lid (carries the glass)
+lid_cap    = 5.0;          // height of the top cap = the lid (carries the glass)
 
 wall       = 2.4;          // side wall thickness (thinnest at mid; thicker at top)
 floor_th   = 2.0;          // base floor
@@ -53,12 +56,43 @@ oled_stack = 3.2;                     // glass/ribbon height above the PCB
 // ESP32-C3 SuperMini ~22.5 x 18 x 6 (with parts), USB-C on a short end.
 esp_w = 18; esp_l = 22.5; esp_t = 6;
 usb_w = 9.2; usb_h = 3.6;             // USB-C cutout in the side wall
+esp_rib = 1.4;                        // retaining-rail thickness around the board
 
-// MPU6050 GY-521 ~21 x 16 x 3.
-mpu_w = 21; mpu_l = 16; mpu_t = 3;
+// Type-C charge module (TP4056-USB-C class) ~26 x 17 x 5, USB-C on a short end.
+// The LiPo is already wired to this module; it charges through the case wall.
+chg_w = 17; chg_l = 26; chg_t = 5;
+chg_rib = 1.4;
+chgusb_w = 9.2; chgusb_h = 3.6;       // USB-C cutout for the charge module
 
-// 502535 LiPo: 5.0 thick x 25 x 35 (+ wrap/clearance).
-batt_w = 26; batt_l = 36; batt_t = 6;
+// MPU6050 GY-521 ~21 x 16 x 3. Mounted 16(X) x 21(Y) on a shelf over the charge
+// module (floor is full); still rigid to the case so it tracks the wrist.
+mpu_w = 16; mpu_l = 21; mpu_t = 3;
+
+// LiPo pouch — user-specified compartment 20(W) x 40(L) x 6(H) mm.
+batt_w = 20; batt_l = 40; batt_t = 6;
+batt_rib  = 1.6;           // retaining-wall thickness around the LiPo pocket
+batt_clr  = 0.4;           // slip clearance so the cell drops in
+// Pocket hugs the -X inner wall; +X column holds the ESP32 + charge module.
+batt_cx   = -(W/2 - wall - batt_rib - batt_w/2 - batt_clr);
+
+// ---- Floor layout (everything single-layer; W/L grown to make it fit) ------
+// -X column = battery (batt_cx, above). +X column = ESP32 (-Y end) + charge (+Y).
+esp_cx = batt_cx + batt_w/2 + batt_clr + batt_rib + 1 + esp_w/2;  // +X column centre
+esp_cy = -(L/2 - wall - esp_l/2 - 0.5);                            // -Y end
+chg_cx = esp_cx;
+chg_cy =  (L/2 - wall - chg_l/2 - 0.5);                            // +Y end
+mpu_z  = floor_th + chg_t + 0.6;                                   // MPU shelf over charge
+
+// ---- Flex-divider junction board (the "breadboard") -----------------------
+// Holds the 5 flex pull-down resistors + the ribbon/I2C/ESP junction. A real
+// SYB-170 mini-breadboard is 8.5mm tall and will NOT fit under the 1.3" OLED
+// here; cut it (or use perfboard) to ~22 x 40 and keep it THIN. It rests flat on
+// the battery compartment walls (no posts — they fouled the ESP32 slot), under
+// the OLED.  8 columns of SYB-170 = 5 resistor cols + 3 bus cols.
+bb_w   = 22; bb_l = 40;    // cut board footprint (X x Y) — sits over the battery
+bb_t   = 2.0;              // board thickness (perfboard ~1.6-2; breadboard 8.5)
+bb_z    = floor_th + batt_t;   // rests on the battery wall top (~8mm); board top
+                               // ~10mm stays under the 1.3" OLED PCB (~11.7mm)
 
 // ---- Side features (crown + button, like the reference) -------------------
 crown_d = 6;  crown_len = 3.5;        // cosmetic crown on +X side
@@ -160,6 +194,37 @@ module apple_lugs_cut() {
     }
 }
 
+// Battery compartment: a low retaining wall around the 20x40x6 LiPo, open top,
+// with a finger-scoop on the +Y end so the cell lifts out. Rounded outer corners
+// keep it clean (minimal/modern) and fused to the floor.
+module battery_bay() {
+    pw = batt_w + 2*batt_clr;
+    pl = batt_l + 2*batt_clr;
+    translate([batt_cx, 0, floor_th])
+        difference() {
+            linear_extrude(batt_t)
+                offset(r = batt_rib) square([pw, pl], center = true);
+            translate([0, 0, -0.5])
+                linear_extrude(batt_t + 1) square([pw, pl], center = true);
+            // scoop on the +Y wall to thumb the battery out
+            translate([0, pl/2 + 0.5, batt_t])
+                rotate([0, 90, 0])
+                    cylinder(d = batt_t*1.5, h = pw*0.6, center = true, $fn = 28);
+        }
+}
+
+// Generic low-walled board pocket / retaining rail. The USB-C opening is cut
+// through the case wall separately in base(); outer ribs that reach the shell
+// just fuse to it. Used for the ESP32 board slot and the charge-module bay.
+module walled_pocket(cx, cy, bw, bl, h, rib, clr = 0.4) {
+    pw = bw + 2*clr; pl = bl + 2*clr;
+    translate([cx, cy, floor_th])
+        difference() {
+            linear_extrude(h) offset(r = rib) square([pw, pl], center = true);
+            translate([0, 0, -0.5]) linear_extrude(h + 1) square([pw, pl], center = true);
+        }
+}
+
 module base() {
     difference() {
         union() {
@@ -179,6 +244,10 @@ module base() {
             translate([W/2 - 1.5, L*0.18, case_h*0.50])
                 rotate([0,90,0]) cylinder(d=crown_d, h=crown_len + 1.5);
             oled_ledge();      // shelves the OLED just under the window
+            battery_bay();     // 20x40x6 LiPo compartment (-X side); its walls
+                               // also carry the flex-divider board (no posts)
+            walled_pocket(esp_cx, esp_cy, esp_w, esp_l, 3, esp_rib); // ESP32 slot
+            walled_pocket(chg_cx, chg_cy, chg_w, chg_l, 3, chg_rib); // charge bay
             apple_lugs_add();
         }
 
@@ -188,27 +257,37 @@ module base() {
         corner_centres()
             translate([0,0,floor_th+0.6]) cylinder(d=screw_pilot, h=case_h);
 
-        // USB-C slot on +X wall (ESP32 short end)
-        translate([W/2, -L*0.18, floor_th+esp_t/2+1])
-            rotate([0,90,0]) cube([usb_h, usb_w, wall*3], center=true);
+        // ESP32 USB-C slot on -Y wall (board short end; offset +X from the ribbon)
+        translate([esp_cx, -L/2, floor_th+esp_t/2])
+            cube([usb_w, wall*3, usb_h], center=true);
+
+        // charge-module USB-C slot on +Y wall (the LiPo charges through here)
+        translate([chg_cx, L/2, floor_th+chg_t/2])
+            cube([chgusb_w, wall*3, chgusb_h], center=true);
 
         // tactile button hole on +X wall
         translate([W/2, L*0.05, case_h*0.38])
             rotate([0,90,0]) cylinder(d=btn_d, h=wall*3, center=true);
 
-        // flex ribbon slot on -Y wall (palm side), at floor level
+        // flex ribbon slot on -Y wall (palm side, centre), at floor level
         translate([0, -L/2, floor_th+ribbon_h/2])
             cube([ribbon_w, wall*3, ribbon_h], center=true);
     }
 }
 
-// OLED support ledges so the glass sits just under the window
+// OLED support so the glass sits just under the window. Instead of four floor
+// posts (which fouled the ESP32 / charge-module slots), the OLED rests on four
+// short tabs cantilevered from the +-X side walls, up at oled_pcb_z — the whole
+// floor below stays clear for the boards.
 oled_glass_top = parting_z - 0.5;             // ~touching the lid underside
 oled_pcb_z     = oled_glass_top - oled_stack - oled_pcb_t;
+oled_tab_th    = 1.5;                          // tab thickness (Z)
 module oled_ledge() {
+    inx = oled_pcb_w/2 - 1;                    // X where the OLED edge lands
+    xwall = W/2 - wall;
     for (sx=[-1,1], sy=[-1,1])
-        translate([sx*(oled_pcb_w/2-2), sy*(oled_pcb_l/2-2), floor_th])
-            cylinder(d=4, h=oled_pcb_z-floor_th);
+        translate([sx*(inx + (xwall-inx)/2), sy*(oled_pcb_l/2-3), oled_pcb_z-oled_tab_th])
+            cube([(xwall-inx)+1, 8, oled_tab_th], center=true);
 }
 
 // ===========================================================================
@@ -256,9 +335,16 @@ module lid() {
 module ghost_parts() {
     // translucent component placeholders for the preview
     color([0.2,0.2,0.2,0.5]) translate([0,0,oled_pcb_z]) cube([oled_pcb_w,oled_pcb_l,oled_pcb_t], center=true);
-    color([0.1,0.4,0.8,0.5]) translate([-L*0.0,-L*0.18,floor_th+esp_t/2]) cube([esp_w,esp_l,esp_t], center=true);
-    color([0.1,0.6,0.3,0.5]) translate([W*0.15,L*0.22,floor_th+mpu_t/2]) cube([mpu_w,mpu_l,mpu_t], center=true);
-    color([0.7,0.5,0.1,0.5]) translate([0,0,floor_th+batt_t/2]) cube([batt_w,batt_l,batt_t], center=true);
+    // ESP32-C3 in its slot (-Y end of the +X column), USB-C to the -Y wall
+    color([0.1,0.4,0.8,0.5]) translate([esp_cx,esp_cy,floor_th+esp_t/2]) cube([esp_w,esp_l,esp_t], center=true);
+    // Type-C charge module (+Y end of the +X column), USB-C to the +Y wall
+    color([0.8,0.2,0.2,0.5]) translate([chg_cx,chg_cy,floor_th+chg_t/2]) cube([chg_w,chg_l,chg_t], center=true);
+    // MPU6050 on the charge module
+    color([0.1,0.6,0.3,0.5]) translate([chg_cx,chg_cy,mpu_z+mpu_t/2]) cube([mpu_w,mpu_l,mpu_t], center=true);
+    // LiPo in its -X compartment
+    color([0.7,0.5,0.1,0.5]) translate([batt_cx,0,floor_th+batt_t/2]) cube([batt_w,batt_l,batt_t], center=true);
+    // thin flex-divider board stacked over the battery
+    color([0.15,0.5,0.15,0.6]) translate([batt_cx,0,bb_z+bb_t/2]) cube([bb_w,bb_l,bb_t], center=true);
 }
 
 if (part == "base")    base();

@@ -7,19 +7,24 @@ import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.material3.Button
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Slider
+import androidx.compose.material3.Surface
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
@@ -41,6 +46,7 @@ fun LiveScreen(
     state: BleUiState,
     onSendCommandClick: (Hand, String) -> Unit,
     onSelectOledPage: (Hand, OledDisplayPage) -> Unit,
+    onToggleRecognition: () -> Unit,
     onGoConnect: () -> Unit
 ) {
     val connected = state.connectedHands
@@ -59,10 +65,18 @@ fun LiveScreen(
         contentPadding = PaddingValues(16.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp)
     ) {
+        item(key = "recognition") {
+            RecognitionCard(
+                enabled = state.recognitionEnabled,
+                labelCount = state.recognizerLabelCount,
+                onToggle = onToggleRecognition
+            )
+        }
         connected.forEach { connection ->
             item(key = "hand-${connection.hand}") {
                 HandLiveSection(
                     connection = connection,
+                    recognitionEnabled = state.recognitionEnabled,
                     onSendCommandClick = { cmd -> onSendCommandClick(connection.hand, cmd) },
                     onSelectOledPage = { page -> onSelectOledPage(connection.hand, page) }
                 )
@@ -71,9 +85,44 @@ fun LiveScreen(
     }
 }
 
+/** Master switch for live sign recognition plus a hint of what it knows. */
+@Composable
+private fun RecognitionCard(
+    enabled: Boolean,
+    labelCount: Int,
+    onToggle: () -> Unit
+) {
+    SectionCard(
+        title = "แปลภาษามือ",
+        subtitle = if (labelCount > 0) {
+            "รู้จำท่านิ่งได้ $labelCount คำจากข้อมูลที่บันทึกไว้"
+        } else {
+            "ยังไม่มีข้อมูลท่า — ไปที่แท็บบันทึกเพื่อสอนท่าก่อน"
+        },
+        trailing = {
+            Switch(
+                checked = enabled,
+                onCheckedChange = { onToggle() },
+                enabled = labelCount > 0
+            )
+        }
+    ) {
+        Text(
+            text = if (enabled) {
+                "กำลังอ่านท่าจากถุงมือแบบเรียลไทม์ — ทำท่าค้างไว้สักครู่"
+            } else {
+                "เปิดสวิตช์เพื่อเริ่มแปลท่ามือเป็นคำ"
+            },
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant
+        )
+    }
+}
+
 @Composable
 private fun HandLiveSection(
     connection: HandConnection,
+    recognitionEnabled: Boolean,
     onSendCommandClick: (String) -> Unit,
     onSelectOledPage: (OledDisplayPage) -> Unit
 ) {
@@ -87,6 +136,13 @@ private fun HandLiveSection(
         subtitle = "นิ้วงอตามเซ็นเซอร์จริง",
         trailing = { BatteryBadge(batteryMv = live?.batteryMv) }
     ) {
+        if (recognitionEnabled) {
+            RecognizedWordBanner(
+                word = connection.recognizedWord,
+                confidence = connection.recognitionConfidence
+            )
+        }
+
         HandVisualizer(
             levels = live?.flex?.map { flexPercent(it) } ?: List(FlexChannels) { 0 },
             modifier = Modifier
@@ -197,6 +253,44 @@ private fun HandLiveSection(
             },
             fontFamily = if (connection.latestPayload == null) null else FontFamily.Monospace
         )
+    }
+}
+
+/** Big read-out of the current recognized sign for one hand. */
+@Composable
+private fun RecognizedWordBanner(word: String?, confidence: Float) {
+    Surface(
+        modifier = Modifier.fillMaxWidth(),
+        shape = MaterialTheme.shapes.medium,
+        color = MaterialTheme.colorScheme.primaryContainer
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 16.dp, vertical = 12.dp),
+            verticalArrangement = Arrangement.spacedBy(6.dp)
+        ) {
+            Text(
+                text = "คำที่อ่านได้",
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.75f)
+            )
+            Text(
+                text = word ?: "—",
+                style = MaterialTheme.typography.headlineSmall,
+                fontWeight = FontWeight.Bold,
+                color = MaterialTheme.colorScheme.onPrimaryContainer
+            )
+            LinearProgressIndicator(
+                progress = { confidence.coerceIn(0f, 1f) },
+                modifier = Modifier.fillMaxWidth()
+            )
+            Text(
+                text = "ความมั่นใจ ${(confidence.coerceIn(0f, 1f) * 100).toInt()}%",
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.75f)
+            )
+        }
     }
 }
 

@@ -104,6 +104,23 @@ class BleViewModel(application: Application) : AndroidViewModel(application) {
     private var autoStopJob: Job? = null
     private var datasetPlaybackJob: Job? = null
 
+    /** Static + dynamic sign classifier, rebuilt whenever the dataset reloads. */
+    private var recognizer: GestureRecognizer? = null
+
+    /** Per-hand live recognition state (smoothing window + gesture capture). */
+    private val recognitionStates = mutableMapOf<Hand, HandRecognitionState>()
+
+    /**
+     * Tracks the still/moving state machine for one hand: a short flex window for
+     * static poses, plus a capture buffer that fills while the hand is moving.
+     */
+    private class HandRecognitionState {
+        val flexWindow = ArrayDeque<List<Int>>()
+        var capturing = false
+        val gestureBuffer = mutableListOf<FloatArray>()
+        var stillFrames = 0
+    }
+
     init {
         refreshDataset()
     }
@@ -764,6 +781,95 @@ class BleViewModel(application: Application) : AndroidViewModel(application) {
         cancelRecordingInternal()
     }
 
+    // ---------- Live recognition ----------
+
+    fun toggleRecognition() {
+        val enabling = !_uiState.value.recognitionEnabled
+        if (enabling && recognizer?.isEmpty != false) {
+            emitToast("ยังไม่มีข้อมูลท่าให้รู้จำ — บันทึกท่าก่อน")
+            return
+        }
+        recognitionStates.clear()
+        _uiState.update {
+            it.copy(
+                recognitionEnabled = enabling,
+                left = it.left.copy(recognizedWord = null, recognitionConfidence = 0f),
+                right = it.right.copy(recognizedWord = null, recognitionConfidence = 0f)
+            )
+        }
+    }
+
+    /**
+     * Live recognition state machine, run per packet:
+     *  - **Still** → average a short flex window and ask the static matcher.
+     *  - **Moving** (gyro magnitude crosses the start threshold) → capture a
+     *    feature trajectory until the hand settles, then ask the dynamic (DTW)
+     *    matcher and emit the recognized sign.
+     */
+    private fun runRecognition(hand: Hand, text: String) {
+        val activeRecognizer = recognizer ?: return
+        val live = parseLiveGloveData(text) ?: return
+        val state = recognitionStates.getOrPut(hand) { HandRecognitionState() }
+        val motion = GestureRecognizer.gyroMagnitude(live.imu)
+
+        state.flexWindow.addLast(live.flex)
+        while (state.flexWindow.size > RECOGNIZE_WINDOW) state.flexWindow.removeFirst()
+
+        // Only attempt moving-sign capture when we actually have IMU data and at
+        // least one dynamic template to compare against.
+        val canCapture = live.imu != null && activeRecognizer.hasDynamic
+
+        if (state.capturing) {
+            state.gestureBuffer.add(activeRecognizer.feature(live.flex, live.imu))
+            state.stillFrames = if (motion < GestureRecognizer.MotionStopCounts) {
+                state.stillFrames + 1
+            } else {
+                0
+            }
+            val settled = state.stillFrames >= MOTION_STOP_FRAMES
+            val overflow = state.gestureBuffer.size >= MAX_GESTURE_FRAMES
+            if (settled || overflow) {
+                finishGestureCapture(hand, state)
+            }
+            return
+        }
+
+        if (canCapture && motion >= GestureRecognizer.MotionStartCounts) {
+            state.capturing = true
+            state.stillFrames = 0
+            state.gestureBuffer.clear()
+            state.gestureBuffer.add(activeRecognizer.feature(live.flex, live.imu))
+            return
+        }
+
+        // Still hand → static pose matching on the smoothed flex window.
+        if (!activeRecognizer.hasStatic) return
+        val averaged = (0 until FlexChannels).map { channel ->
+            state.flexWindow.sumOf { it.getOrElse(channel) { 0 } } / state.flexWindow.size
+        }
+        applyRecognition(hand, activeRecognizer.classifyStatic(averaged, hand))
+    }
+
+    private fun finishGestureCapture(hand: Hand, state: HandRecognitionState) {
+        val activeRecognizer = recognizer
+        val captured = state.gestureBuffer.toList()
+        state.capturing = false
+        state.stillFrames = 0
+        state.gestureBuffer.clear()
+        if (activeRecognizer == null || captured.size < MIN_GESTURE_FRAMES) return
+        applyRecognition(hand, activeRecognizer.classifyDynamic(captured, hand))
+    }
+
+    private fun applyRecognition(hand: Hand, result: RecognitionResult?) {
+        updateHand(hand) {
+            it.copy(
+                // Sticky word: hold the last confident sign until a new one is sure.
+                recognizedWord = if (result?.isConfident == true) result.word else it.recognizedWord,
+                recognitionConfidence = result?.confidence ?: it.recognitionConfidence
+            )
+        }
+    }
+
     fun refreshDataset() {
         loadDataset(preferredSessionId = _uiState.value.selectedDatasetSessionId)
     }
@@ -937,6 +1043,9 @@ class BleViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch {
             _uiState.update { it.copy(isDatasetLoading = true, datasetPlaybackPlaying = false) }
             val result = withContext(Dispatchers.IO) { loadDatasetFromCsv() }
+            val builtRecognizer = withContext(Dispatchers.IO) { GestureRecognizer(result.sessions) }
+            recognizer = builtRecognizer
+            recognitionStates.clear()
             _uiState.update { state ->
                 val preferred = preferredSessionId
                     ?.takeIf { id -> result.sessions.any { it.id == id } }
@@ -958,7 +1067,10 @@ class BleViewModel(application: Application) : AndroidViewModel(application) {
                     datasetPlaybackPlaying = false,
                     datasetCsvPath = result.path,
                     datasetMessage = result.message,
-                    isDatasetLoading = false
+                    isDatasetLoading = false,
+                    recognizerLabelCount = builtRecognizer.labels.size,
+                    // Keep recognition on only if there is still something to recognize.
+                    recognitionEnabled = state.recognitionEnabled && !builtRecognizer.isEmpty
                 )
             }
             addLog("Dataset loaded: ${result.sessions.size} sessions")
@@ -1477,6 +1589,10 @@ class BleViewModel(application: Application) : AndroidViewModel(application) {
                 _uiState.update { it.copy(recordingSampleCount = recordingBuffer.size) }
             }
         }
+
+        if (_uiState.value.recognitionEnabled) {
+            runRecognition(hand, text)
+        }
     }
 
     private fun parseFlexSample(hand: Hand, text: String): FlexSample? {
@@ -1615,5 +1731,17 @@ class BleViewModel(application: Application) : AndroidViewModel(application) {
 
     private companion object {
         const val MAX_CONNECT_ATTEMPTS = 3
+
+        /** Number of recent live readings averaged together before static matching. */
+        const val RECOGNIZE_WINDOW = 6
+
+        /** Consecutive still frames that end a moving-gesture capture. */
+        const val MOTION_STOP_FRAMES = 4
+
+        /** Shortest capture (frames) worth classifying as a moving sign. */
+        const val MIN_GESTURE_FRAMES = 8
+
+        /** Safety cap so a continuously moving hand can't capture forever. */
+        const val MAX_GESTURE_FRAMES = 120
     }
 }
