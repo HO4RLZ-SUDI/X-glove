@@ -21,11 +21,11 @@ part = "preview";          // "base" | "lid" | "preview" | "section"
 $fn = 64;
 
 // ---- Outer shell (squircle "pillow" form, like the reference) -------------
-W          = 48;           // width  (X)  — grown from ref 43.4 to floor the LiPo
+W          = 52;           // width  (X)  — grown from ref 43.4 to floor the LiPo
                            // compartment (-X) beside the ESP32 + charge module (+X)
 L          = 55;           // length (Y)  — grown from ref 49.0 so the +X column fits
                            // the ESP32 and the Type-C charge module end-to-end
-case_h     = 23;           // thickness (Z). Ref is 14.4 (a solid styling shell);
+case_h     = 28;           // thickness (Z). Ref is 14.4 (a solid styling shell);
                            // raised to hold the 6mm LiPo + ESP32-C3 + 1.3" OLED +
                            // a thin flex-divider perfboard stacked over the battery.
                            // The pillow form makes it read thinner than a box.
@@ -39,9 +39,9 @@ corner_r   = 10;           // squircle corner radius (ref ~10)
 edge_r     = 4.0;          // 3D fillet radius on all outer edges (the pillow)
 lid_cap    = 5.0;          // height of the top cap = the lid (carries the glass)
 
-wall       = 2.4;          // side wall thickness (thinnest at mid; thicker at top)
-floor_th   = 2.0;          // base floor
-lid_th     = 2.0;          // lid solid-plate thickness under the glass
+wall       = 3.0;          // side wall thickness (thinnest at mid; thicker at top)
+floor_th   = 3.0;          // base floor
+lid_th     = 3.0;          // lid solid-plate thickness under the glass
 fit_gap    = 0.25;         // print clearance between lid and base rebate
 
 // The lid is the whole domed cap; base is the tub up to here.
@@ -68,8 +68,8 @@ chgusb_w = 9.2; chgusb_h = 3.6;       // USB-C cutout for the charge module
 // module (floor is full); still rigid to the case so it tracks the wrist.
 mpu_w = 16; mpu_l = 21; mpu_t = 3;
 
-// LiPo pouch — user-specified compartment 20(W) x 40(L) x 6(H) mm.
-batt_w = 20; batt_l = 40; batt_t = 6;
+// LiPo pouch — user-specified compartment 22(W) x 40(L) x 7.5(H) mm.
+batt_w = 22; batt_l = 40; batt_t = 7.5;
 batt_rib  = 1.6;           // retaining-wall thickness around the LiPo pocket
 batt_clr  = 0.4;           // slip clearance so the cell drops in
 // Pocket hugs the -X inner wall; +X column holds the ESP32 + charge module.
@@ -236,15 +236,12 @@ module base() {
                 }
                 cavity();
             }
-            // corner bosses for the lid screws
-            corner_centres()
-                translate([0,0,floor_th]) cylinder(d=boss_d, h=parting_z-floor_th);
             // crown stub on +X (cosmetic, like the reference). Rooted inside the
             // flat side wall so it stays fused; pokes ~crown_len proud.
             translate([W/2 - 1.5, L*0.18, case_h*0.50])
                 rotate([0,90,0]) cylinder(d=crown_d, h=crown_len + 1.5);
             oled_ledge();      // shelves the OLED just under the window
-            battery_bay();     // 20x40x6 LiPo compartment (-X side); its walls
+            battery_bay();     // 22x40x7.5 LiPo compartment (-X side); its walls
                                // also carry the flex-divider board (no posts)
             walled_pocket(esp_cx, esp_cy, esp_w, esp_l, 3, esp_rib); // ESP32 slot
             walled_pocket(chg_cx, chg_cy, chg_w, chg_l, 3, chg_rib); // charge bay
@@ -252,10 +249,6 @@ module base() {
         }
 
         apple_lugs_cut();      // spring-bar channel + concave band seat
-
-        // boss pilot holes
-        corner_centres()
-            translate([0,0,floor_th+0.6]) cylinder(d=screw_pilot, h=case_h);
 
         // ESP32 USB-C slot on -Y wall (board short end; offset +X from the ribbon)
         translate([esp_cx, -L/2, floor_th+esp_t/2])
@@ -321,11 +314,6 @@ module lid() {
         // rectangular OLED window (active area + margin), through to the cavity
         translate([0,0,parting_z-lip_h-1])
             linear_extrude(case_h) rrect(oled_act_w+2, oled_act_l+2, 2);
-        // countersunk screw holes
-        corner_centres() {
-            translate([0,0,parting_z-lip_h-1]) cylinder(d=screw_pilot+0.8, h=case_h);
-            translate([0,0,case_h-1.0])        cylinder(d=screw_head, h=3);
-        }
     }
 }
 
@@ -349,6 +337,7 @@ module ghost_parts() {
 
 if (part == "base")    base();
 else if (part == "lid") lid();
+else if (part == "full") { base(); lid(); }   // assembled case (both printable parts)
 else if (part == "section") {
     // assembled, cut on the Y=0 plane (keep +Y half) so the lid seating and the
     // component stack are both visible

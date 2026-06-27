@@ -11,7 +11,7 @@
 #include <BLEUtils.h>
 #include <Preferences.h>
 
-#define FW_VERSION "2.1.0"
+#define FW_VERSION "2.2.0"
 
 #ifndef GLOVE_ENABLE_OLED
 #define GLOVE_ENABLE_OLED 1
@@ -105,6 +105,88 @@ enum OledPage : uint8_t {
 #endif
 
 // ---------------------------------------------------------------------------
+// Gesture recognition
+// ---------------------------------------------------------------------------
+// Each finger contributes one bit to a 5-bit pattern (1 = bent). Bit order
+// matches FLEX_PINS: bit0 = F1 thumb .. bit4 = F5 pinky. A bent finger combo,
+// held briefly, maps to one Thai phrase from the glove's gesture chart -- it is
+// emitted as "GEST:<phrase>" over BLE (for the Android app to speak) and as
+// "SAY:<phrase>" over serial (for the host greet_bridge.py to speak). This
+// mirrors firmware/tests/flex_sensor_test so the same chart works in both.
+#define B_THUMB  0x01  // F1 (โป้ง)
+#define B_INDEX  0x02  // F2 (ชี้)
+#define B_MIDDLE 0x04  // F3 (กลาง)
+#define B_RING   0x08  // F4 (นาง)
+#define B_PINKY  0x10  // F5 (ก้อย)
+
+// A finger flips to "bent" once |delta| rises past GESTURE_BEND_ON and back to
+// "straight" once it falls below GESTURE_BEND_OFF; the gap is hysteresis so a
+// finger hovering at the edge can't chatter between bent/straight.
+static const int GESTURE_BEND_ON = 320;
+static const int GESTURE_BEND_OFF = 180;
+// A non-zero pattern must hold unchanged this long before it fires, so the
+// transient patterns you sweep through while curling fingers are ignored.
+static const uint32_t GESTURE_SETTLE_MS = 300;
+// Flex sampling cadence for gesture detection, independent of telemetry so it
+// works whether or not a BLE client is connected/streaming.
+static const uint32_t GESTURE_SAMPLE_MS = 40;
+// Readings below this look like a disconnect; the finger holds its last state.
+static const int GESTURE_GLITCH_FLOOR = 100;
+// Smoothing for the gesture sampler's own EMA (snappy enough to catch a hold).
+static const float GESTURE_EMA_ALPHA = 0.35f;
+
+struct Gesture {
+    uint8_t mask;
+    const char* thai;
+    const char* en;
+};
+
+// Every mask is unique so each gesture is distinguishable. Five entries marked
+// (reassigned) were moved off duplicate/undetectable combos from the printed
+// chart so all 30 phrases work -- keep in sync with flex_sensor_test:
+//   เข้าใจ was = ใช่ (F3+F4+F5) -> F3+F5; เวียนหัว was = ปวดหัว (F1+F4) -> F1+F2+F4;
+//   เจ็บ was = ต้องการพัก (F2+F4+F5) -> F1+F2+F4+F5; ต้องการน้ำ was = ไม่เป็นไร
+//   (F1+F2+F3) -> F1+F2+F5; ลาก่อน was "กางทั้ง5นิ้ว" (undetectable) -> F2+F3+F5.
+static const Gesture GESTURES[] = {
+    // --- หมวดการใช้ชีวิตประจำวัน (daily life) ---
+    { B_MIDDLE | B_RING,                      "หิวข้าว",     "hungry" },
+    { B_THUMB | B_MIDDLE | B_RING,            "ดื่มน้ำ",      "drink water" },
+    { B_THUMB | B_INDEX | B_MIDDLE | B_PINKY, "เข้าห้องน้ำ",  "bathroom" },
+    { B_INDEX,                                "ง่วงนอน",     "sleepy" },
+    { B_THUMB | B_PINKY,                      "หนาว",       "cold" },
+    { B_PINKY,                                "ร้อน",        "hot" },
+    { B_INDEX | B_MIDDLE,                     "อาบน้ำ",      "shower" },
+    { B_INDEX | B_MIDDLE | B_RING,            "กลับบ้าน",    "go home" },
+    { B_THUMB,                                "ไม่สบาย",     "sick" },
+    { B_INDEX | B_PINKY,                      "ทำความสะอาด", "clean up" },
+
+    // --- หมวดการสื่อสารทั่วไป (communication) ---
+    { B_THUMB | B_RING | B_PINKY,             "สวัสดี",       "hello" },
+    { B_THUMB | B_INDEX | B_MIDDLE | B_RING,  "ขอโทษ",      "sorry" },
+    { B_INDEX | B_MIDDLE | B_RING | B_PINKY,  "ขอบคุณ",     "thank you" },
+    { B_MIDDLE | B_RING | B_PINKY,            "ใช่",         "yes" },
+    { B_THUMB | B_MIDDLE | B_RING | B_PINKY,  "ไม่ใช่",       "no" },
+    { B_RING,                                 "รอสักครู่",    "wait" },
+    { B_MIDDLE | B_PINKY,                     "เข้าใจ",       "understand" },     // reassigned
+    { B_THUMB | B_MIDDLE,                     "ไม่เข้าใจ",     "dont understand" },
+    { B_INDEX | B_MIDDLE | B_PINKY,           "ลาก่อน",      "goodbye" },        // reassigned
+    { B_THUMB | B_INDEX | B_MIDDLE,           "ไม่เป็นไร",     "its ok" },
+
+    // --- หมวดขอความช่วยเหลือ (asking for help) ---
+    { B_THUMB | B_INDEX | B_MIDDLE | B_RING | B_PINKY, "ช่วยด้วย", "help" },
+    { B_INDEX | B_RING,                       "กลัว",        "scared" },
+    { B_RING | B_PINKY,                       "หายใจไม่ออก",  "cant breathe" },
+    { B_THUMB | B_RING,                       "ปวดหัว",      "headache" },
+    { B_THUMB | B_INDEX,                      "ปวดท้อง",     "stomach ache" },
+    { B_THUMB | B_INDEX | B_RING,             "เวียนหัว",     "dizzy" },          // reassigned
+    { B_THUMB | B_MIDDLE | B_PINKY,           "หลงทาง",      "lost" },
+    { B_INDEX | B_RING | B_PINKY,             "ต้องการพัก",   "need rest" },
+    { B_THUMB | B_INDEX | B_RING | B_PINKY,   "เจ็บ",         "hurt" },           // reassigned
+    { B_THUMB | B_INDEX | B_PINKY,            "ต้องการน้ำ",   "need water" },      // reassigned
+};
+static const int GESTURE_COUNT = sizeof(GESTURES) / sizeof(GESTURES[0]);
+
+// ---------------------------------------------------------------------------
 // State
 // ---------------------------------------------------------------------------
 
@@ -135,6 +217,17 @@ uint32_t advertisingRestartAtMs = 0;
 
 float flexEma[FLEX_COUNT] = {0};
 bool flexEmaReady = false;
+
+// Gesture recognition uses its own flex sampler (separate EMA + baseline) so it
+// runs continuously and never perturbs the app-facing telemetry pipeline above.
+float gestureEma[FLEX_COUNT] = {0};
+bool gestureEmaReady = false;
+int gestureBaseline[FLEX_COUNT] = {0};
+bool fingerBent[FLEX_COUNT] = {false};
+uint8_t gestureMaskCandidate = 0;   // pattern currently being held / settled
+uint32_t gestureCandidateSince = 0; // millis() when that pattern began
+uint8_t gestureSpokenMask = 0;      // last pattern spoken; re-arms at neutral
+uint32_t lastGestureSampleMs = 0;
 
 int cachedBatteryMv = -1;
 uint32_t lastBatteryReadMs = 0;
@@ -171,6 +264,10 @@ static uint8_t waveBuffer[FLEX_COUNT][WAVE_SAMPLES];
 static uint8_t waveHead = 0;
 static int8_t rainDropY[RAIN_COLS];
 static uint8_t rainDropLen[RAIN_COLS];
+// Last recognised gesture, shown as a brief overlay (English: the OLED font has
+// no Thai glyphs). Empty / past-deadline = nothing to draw.
+char gestureLabel[20] = "";
+uint32_t gestureLabelUntilMs = 0;
 #endif
 
 // ---------------------------------------------------------------------------
@@ -338,6 +435,93 @@ static void saveHand(char hand) {
     }
 }
 
+// Return the index of the gesture matching `mask`, or -1 if none.
+static int findGesture(uint8_t mask) {
+    for (int i = 0; i < GESTURE_COUNT; i++) {
+        if (GESTURES[i].mask == mask) return i;
+    }
+    return -1;
+}
+
+// Speak a recognised gesture: serial for the PC bridge, BLE for the app, and a
+// brief OLED overlay so it's visible on the device too.
+static void fireGesture(int gi) {
+    Serial.print("SAY:");
+    Serial.println(GESTURES[gi].thai);
+    notifyText(String("GEST:") + GESTURES[gi].thai);
+#if GLOVE_ENABLE_OLED
+    strncpy(gestureLabel, GESTURES[gi].en, sizeof(gestureLabel) - 1);
+    gestureLabel[sizeof(gestureLabel) - 1] = '\0';
+    gestureLabelUntilMs = millis() + 1500;
+    lastActivityMs = millis(); // wake the screensaver so the gesture is seen
+#endif
+}
+
+// Capture the flat-hand reference for gesture detection. Independent of the
+// app's telemetry baseline (flexBaseline), so it's safe to re-zero any time.
+static void captureGestureBaseline() {
+    for (int i = 0; i < FLEX_COUNT; i++) {
+        uint32_t total = 0;
+        int good = 0;
+        for (int s = 0; s < 16; s++) {
+            int r = readAnalogAverage(FLEX_PINS[i]);
+            if (r >= GESTURE_GLITCH_FLOOR) { total += r; good++; }
+            delay(2);
+        }
+        gestureBaseline[i] = good > 0 ? static_cast<int>(total / good) : 0;
+        gestureEma[i] = gestureBaseline[i];
+        fingerBent[i] = false;
+    }
+    gestureEmaReady = true;
+    gestureMaskCandidate = 0;
+    gestureSpokenMask = 0;
+}
+
+// Sample the flex sensors, build the bent-finger pattern, and fire a phrase when
+// a known pattern has been held steady. Rate-limited to GESTURE_SAMPLE_MS.
+static void updateGestures() {
+    uint32_t now = millis();
+    if (now - lastGestureSampleMs < GESTURE_SAMPLE_MS) return;
+    lastGestureSampleMs = now;
+
+    uint8_t mask = 0;
+    for (int i = 0; i < FLEX_COUNT; i++) {
+        int raw = readAnalogAverage(FLEX_PINS[i]);
+        bool glitch = raw < GESTURE_GLITCH_FLOOR;
+        if (!glitch) {
+            if (!gestureEmaReady) gestureEma[i] = raw;
+            else gestureEma[i] += GESTURE_EMA_ALPHA * (raw - gestureEma[i]);
+        }
+        int delta = static_cast<int>(lroundf(gestureEma[i])) - gestureBaseline[i];
+        int mag = abs(delta);
+        // Per-finger bend state with hysteresis; a glitch holds the last state.
+        if (!glitch) {
+            if (mag >= GESTURE_BEND_ON) fingerBent[i] = true;
+            else if (mag <= GESTURE_BEND_OFF) fingerBent[i] = false;
+        }
+        if (fingerBent[i]) mask |= (1 << i);
+    }
+    gestureEmaReady = true;
+
+    if (mask != gestureMaskCandidate) {
+        gestureMaskCandidate = mask;
+        gestureCandidateSince = now;
+    } else if (now - gestureCandidateSince >= GESTURE_SETTLE_MS &&
+               gestureMaskCandidate != gestureSpokenMask) {
+        if (gestureMaskCandidate == 0) {
+            gestureSpokenMask = 0; // hand relaxed -> re-arm, nothing to say
+        } else {
+            int gi = findGesture(gestureMaskCandidate);
+            if (gi >= 0) {
+                fireGesture(gi);
+                gestureSpokenMask = gestureMaskCandidate;
+            }
+            // Unknown pattern: leave spokenMask alone so changing a finger to
+            // reach a known combo still fires.
+        }
+    }
+}
+
 static void calibrateFlexBaseline() {
 #if GLOVE_ENABLE_OLED
     if (oledReady) {
@@ -364,6 +548,7 @@ static void calibrateFlexBaseline() {
         prefs.putUShort(("z" + String(i)).c_str(), flexBaseline[i]);
     }
     flexEmaReady = true;
+    captureGestureBaseline(); // re-zero gesture detection with the hand flat too
     notifyText("OK:CAL");
 }
 
@@ -769,6 +954,20 @@ static void drawLowBatteryOverlay(const TelemetrySnapshot& snapshot) {
     oled.print("LOW BATT");
 }
 
+// Brief banner naming the last recognised gesture (English label).
+static void drawGestureOverlay() {
+    if (gestureLabel[0] == '\0' || millis() >= gestureLabelUntilMs) return;
+    const int16_t w = 120, h = 18, x = (128 - w) / 2, y = 23;
+    oled.setDrawColor(0);
+    oled.drawBox(x, y, w, h);
+    oled.setDrawColor(1);
+    oled.drawFrame(x, y, w, h);
+    oled.setFont(u8g2_font_6x12_tf);
+    int16_t tw = oled.getStrWidth(gestureLabel);
+    oled.setCursor((128 - tw) / 2, y + 13);
+    oled.print(gestureLabel);
+}
+
 static void renderOled(const TelemetrySnapshot& snapshot) {
     if (!oledReady) return;
 
@@ -793,6 +992,7 @@ static void renderOled(const TelemetrySnapshot& snapshot) {
     }
 
     drawLowBatteryOverlay(snapshot);
+    drawGestureOverlay();
     oled.sendBuffer();
 }
 
@@ -969,6 +1169,8 @@ static void sendStatus() {
     status += ",l=";
     status += String(oledBrightness);
 #endif
+    status += ",g=";
+    status += String(GESTURE_COUNT); // number of recognisable gestures
     notifyText(status);
 }
 
@@ -1222,6 +1424,7 @@ void setup() {
     Serial.begin(115200);
     configureAdc();
     loadSettings();
+    captureGestureBaseline(); // flat-hand reference for gesture detection
 #if GLOVE_ENABLE_OLED || GLOVE_ENABLE_IMU
     startI2C();
 #endif
@@ -1282,6 +1485,10 @@ void loop() {
         oldDeviceConnected = deviceConnected;
         Serial.println("BLE client connected");
     }
+
+    // Recognise bent-finger gestures and speak them (serial + BLE). Runs every
+    // loop regardless of connection; self-rate-limited to GESTURE_SAMPLE_MS.
+    updateGestures();
 
 #if GLOVE_ENABLE_OLED
     updateOled();

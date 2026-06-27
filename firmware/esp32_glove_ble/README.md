@@ -1,4 +1,4 @@
-# ESP32 BLE Glove Firmware (v2.1.0)
+# ESP32 BLE Glove Firmware (v2.2.0)
 
 Arduino sketch for the Android app in this repo.
 
@@ -16,6 +16,10 @@ Arduino sketch for the Android app in this repo.
     Omitted entirely when no IMU is present, so the app treats them as optional.
   - `b` = battery millivolts (omitted when battery monitoring is off)
   - `n` = packet sequence number
+- Gesture notify payload: `GEST:<thai phrase>` — sent once when a bent-finger
+  gesture is recognised (see [Gestures](#gestures)). Independent of `START`/`STOP`
+  streaming. The same phrase is also printed to USB serial as `SAY:<thai phrase>`
+  for the host `tests/flex_sensor_test/greet_bridge.py` TTS bridge.
 - Commands written to `FFE1`:
   - `CAL`: stores the current flex readings as baseline.
   - `CAL:CLEAR` (or `RESETCAL`): clears the stored baseline.
@@ -23,8 +27,10 @@ Arduino sketch for the Android app in this repo.
   - `STOP`: stops live notifications.
   - `RATE:<ms>`: sets the telemetry interval (20-1000 ms, persisted).
   - `STATUS`: replies `OK:STATUS:s=<stream>,r=<rate>,b=<mv>,u=<uptime s>,p=<packets>,h=<L|R|->`
-    (plus `,i=<imu present 0/1>` when the IMU is enabled and
-    `,l=<oled brightness 0-100>` when the OLED is enabled). `h` is the hand tag.
+    (plus `,i=<imu present 0/1>` when the IMU is enabled,
+    `,l=<oled brightness 0-100>` when the OLED is enabled, and
+    `,g=<gesture count>`). `h` is the hand tag.
+  - `CAL` also re-zeros the gesture detector (do it with the hand held flat).
   - `VER`: replies `OK:VER:<firmware version>`.
   - `PING`: replies `OK:PONG`.
   - `OLED:DASH`, `OLED:TELEM`, `OLED:SYS`, `OLED:HAND`, `OLED:WAVE`: switches
@@ -43,6 +49,40 @@ Arduino sketch for the Android app in this repo.
 Commands received over BLE are queued and executed from `loop()`, so slow work
 (calibration animation, NVS writes) never blocks the BLE stack thread. If a
 command arrives while another is still queued, the firmware replies `ERR:BUSY`.
+
+## Gestures
+
+The firmware decides per finger whether it is bent (with hysteresis) and turns
+the five bend states into a 5-bit pattern. Holding a known pattern steady
+(~300 ms) fires its phrase once over BLE (`GEST:<phrase>`) and serial
+(`SAY:<phrase>`); relax to flat (or form another combo) to fire again. A
+flat-hand reference is captured on boot and on every `CAL` — keep the hand flat
+for both.
+
+Detection runs continuously, even with no BLE client connected (so the USB
+serial → `greet_bridge.py` TTS path works standalone). The full chart, the five
+combos reassigned off duplicate/undetectable poses, and live-tuning notes live
+in [`../tests/flex_sensor_test/README.md`](../tests/flex_sensor_test/README.md);
+the `GESTURES[]` table here is kept in sync with that sketch.
+
+Finger codes **1**=thumb, **2**=index, **3**=middle, **4**=ring, **5**=pinky.
+Bend the listed fingers and hold:
+
+| Fingers | Phrase | | Fingers | Phrase | | Fingers | Phrase |
+|---|---|---|---|---|---|---|---|
+| 3 4 | หิวข้าว | | 1 4 5 | สวัสดี | | 1 2 3 4 5 | ช่วยด้วย |
+| 1 3 4 | ดื่มน้ำ | | 1 2 3 4 | ขอโทษ | | 2 4 | กลัว |
+| 1 2 3 5 | เข้าห้องน้ำ | | 2 3 4 5 | ขอบคุณ | | 4 5 | หายใจไม่ออก |
+| 2 | ง่วงนอน | | 3 4 5 | ใช่ | | 1 4 | ปวดหัว |
+| 1 5 | หนาว | | 1 3 4 5 | ไม่ใช่ | | 1 2 | ปวดท้อง |
+| 5 | ร้อน | | 4 | รอสักครู่ | | 1 2 4 | เวียนหัว |
+| 2 3 | อาบน้ำ | | 3 5 | เข้าใจ | | 1 3 5 | หลงทาง |
+| 2 3 4 | กลับบ้าน | | 1 3 | ไม่เข้าใจ | | 2 4 5 | ต้องการพัก |
+| 1 | ไม่สบาย | | 2 3 5 | ลาก่อน | | 1 2 4 5 | เจ็บ |
+| 2 5 | ทำความสะอาด | | 1 2 3 | ไม่เป็นไร | | 1 2 5 | ต้องการน้ำ |
+
+Tuning constants near the top of the sketch: `GESTURE_BEND_ON` (320),
+`GESTURE_BEND_OFF` (180), `GESTURE_SETTLE_MS` (300), `GESTURE_SAMPLE_MS` (40).
 
 ## Signal quality
 
