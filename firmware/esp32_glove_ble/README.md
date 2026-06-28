@@ -60,29 +60,30 @@ flat-hand reference is captured on boot and on every `CAL` — keep the hand fla
 for both.
 
 Detection runs continuously, even with no BLE client connected (so the USB
-serial → `greet_bridge.py` TTS path works standalone). The full chart, the five
-combos reassigned off duplicate/undetectable poses, and live-tuning notes live
-in [`../tests/flex_sensor_test/README.md`](../tests/flex_sensor_test/README.md);
-the `GESTURES[]` table here is kept in sync with that sketch.
+serial → `greet_bridge.py` TTS path works standalone). The `GESTURES[]` table
+here is kept in sync with
+[`../tests/flex_sensor_test/README.md`](../tests/flex_sensor_test/README.md),
+which has the live-tuning notes.
 
+The 10 most-useful phrases, each on an easy 1–2 finger (or full-fist) combo.
 Finger codes **1**=thumb, **2**=index, **3**=middle, **4**=ring, **5**=pinky.
 Bend the listed fingers and hold:
 
-| Fingers | Phrase | | Fingers | Phrase | | Fingers | Phrase |
-|---|---|---|---|---|---|---|---|
-| 3 4 | หิวข้าว | | 1 4 5 | สวัสดี | | 1 2 3 4 5 | ช่วยด้วย |
-| 1 3 4 | ดื่มน้ำ | | 1 2 3 4 | ขอโทษ | | 2 4 | กลัว |
-| 1 2 3 5 | เข้าห้องน้ำ | | 2 3 4 5 | ขอบคุณ | | 4 5 | หายใจไม่ออก |
-| 2 | ง่วงนอน | | 3 4 5 | ใช่ | | 1 4 | ปวดหัว |
-| 1 5 | หนาว | | 1 3 4 5 | ไม่ใช่ | | 1 2 | ปวดท้อง |
-| 5 | ร้อน | | 4 | รอสักครู่ | | 1 2 4 | เวียนหัว |
-| 2 3 | อาบน้ำ | | 3 5 | เข้าใจ | | 1 3 5 | หลงทาง |
-| 2 3 4 | กลับบ้าน | | 1 3 | ไม่เข้าใจ | | 2 4 5 | ต้องการพัก |
-| 1 | ไม่สบาย | | 2 3 5 | ลาก่อน | | 1 2 4 5 | เจ็บ |
-| 2 5 | ทำความสะอาด | | 1 2 3 | ไม่เป็นไร | | 1 2 5 | ต้องการน้ำ |
+| Fingers | Phrase | English | |
+|---|---|---|---|
+| 1 2 3 4 5 | ช่วยด้วย | help | (fist) |
+| 1 2 | เจ็บ | hurt | |
+| 2 | ใช่ | yes | |
+| 2 3 | ไม่ใช่ | no | |
+| 1 | หิวข้าว | hungry | |
+| 5 | ต้องการน้ำ | need water | |
+| 4 5 | เข้าห้องน้ำ | bathroom | |
+| 1 5 | สวัสดี | hello | |
+| 2 3 4 5 | ขอบคุณ | thank you | |
+| 2 3 4 | ไม่สบาย | sick | |
 
-Tuning constants near the top of the sketch: `GESTURE_BEND_ON` (320),
-`GESTURE_BEND_OFF` (180), `GESTURE_SETTLE_MS` (300), `GESTURE_SAMPLE_MS` (40).
+Tuning constants near the top of the sketch: `GESTURE_BEND_ON` (200),
+`GESTURE_BEND_OFF` (120), `GESTURE_SETTLE_MS` (300), `GESTURE_SAMPLE_MS` (40).
 
 ## Signal quality
 

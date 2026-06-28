@@ -122,8 +122,8 @@ enum OledPage : uint8_t {
 // A finger flips to "bent" once |delta| rises past GESTURE_BEND_ON and back to
 // "straight" once it falls below GESTURE_BEND_OFF; the gap is hysteresis so a
 // finger hovering at the edge can't chatter between bent/straight.
-static const int GESTURE_BEND_ON = 320;
-static const int GESTURE_BEND_OFF = 180;
+static const int GESTURE_BEND_ON = 200;
+static const int GESTURE_BEND_OFF = 120;
 // A non-zero pattern must hold unchanged this long before it fires, so the
 // transient patterns you sweep through while curling fingers are ignored.
 static const uint32_t GESTURE_SETTLE_MS = 300;
@@ -141,48 +141,19 @@ struct Gesture {
     const char* en;
 };
 
-// Every mask is unique so each gesture is distinguishable. Five entries marked
-// (reassigned) were moved off duplicate/undetectable combos from the printed
-// chart so all 30 phrases work -- keep in sync with flex_sensor_test:
-//   เข้าใจ was = ใช่ (F3+F4+F5) -> F3+F5; เวียนหัว was = ปวดหัว (F1+F4) -> F1+F2+F4;
-//   เจ็บ was = ต้องการพัก (F2+F4+F5) -> F1+F2+F4+F5; ต้องการน้ำ was = ไม่เป็นไร
-//   (F1+F2+F3) -> F1+F2+F5; ลาก่อน was "กางทั้ง5นิ้ว" (undetectable) -> F2+F3+F5.
+// The 10 most-useful phrases on easy 1-2 finger (or full-fist) combos. Every
+// mask is unique. Keep in sync with firmware/tests/flex_sensor_test.
 static const Gesture GESTURES[] = {
-    // --- หมวดการใช้ชีวิตประจำวัน (daily life) ---
-    { B_MIDDLE | B_RING,                      "หิวข้าว",     "hungry" },
-    { B_THUMB | B_MIDDLE | B_RING,            "ดื่มน้ำ",      "drink water" },
-    { B_THUMB | B_INDEX | B_MIDDLE | B_PINKY, "เข้าห้องน้ำ",  "bathroom" },
-    { B_INDEX,                                "ง่วงนอน",     "sleepy" },
-    { B_THUMB | B_PINKY,                      "หนาว",       "cold" },
-    { B_PINKY,                                "ร้อน",        "hot" },
-    { B_INDEX | B_MIDDLE,                     "อาบน้ำ",      "shower" },
-    { B_INDEX | B_MIDDLE | B_RING,            "กลับบ้าน",    "go home" },
-    { B_THUMB,                                "ไม่สบาย",     "sick" },
-    { B_INDEX | B_PINKY,                      "ทำความสะอาด", "clean up" },
-
-    // --- หมวดการสื่อสารทั่วไป (communication) ---
-    { B_THUMB | B_RING | B_PINKY,             "สวัสดี",       "hello" },
-    { B_THUMB | B_INDEX | B_MIDDLE | B_RING,  "ขอโทษ",      "sorry" },
-    { B_INDEX | B_MIDDLE | B_RING | B_PINKY,  "ขอบคุณ",     "thank you" },
-    { B_MIDDLE | B_RING | B_PINKY,            "ใช่",         "yes" },
-    { B_THUMB | B_MIDDLE | B_RING | B_PINKY,  "ไม่ใช่",       "no" },
-    { B_RING,                                 "รอสักครู่",    "wait" },
-    { B_MIDDLE | B_PINKY,                     "เข้าใจ",       "understand" },     // reassigned
-    { B_THUMB | B_MIDDLE,                     "ไม่เข้าใจ",     "dont understand" },
-    { B_INDEX | B_MIDDLE | B_PINKY,           "ลาก่อน",      "goodbye" },        // reassigned
-    { B_THUMB | B_INDEX | B_MIDDLE,           "ไม่เป็นไร",     "its ok" },
-
-    // --- หมวดขอความช่วยเหลือ (asking for help) ---
-    { B_THUMB | B_INDEX | B_MIDDLE | B_RING | B_PINKY, "ช่วยด้วย", "help" },
-    { B_INDEX | B_RING,                       "กลัว",        "scared" },
-    { B_RING | B_PINKY,                       "หายใจไม่ออก",  "cant breathe" },
-    { B_THUMB | B_RING,                       "ปวดหัว",      "headache" },
-    { B_THUMB | B_INDEX,                      "ปวดท้อง",     "stomach ache" },
-    { B_THUMB | B_INDEX | B_RING,             "เวียนหัว",     "dizzy" },          // reassigned
-    { B_THUMB | B_MIDDLE | B_PINKY,           "หลงทาง",      "lost" },
-    { B_INDEX | B_RING | B_PINKY,             "ต้องการพัก",   "need rest" },
-    { B_THUMB | B_INDEX | B_RING | B_PINKY,   "เจ็บ",         "hurt" },           // reassigned
-    { B_THUMB | B_INDEX | B_PINKY,            "ต้องการน้ำ",   "need water" },      // reassigned
+    { B_THUMB | B_INDEX | B_MIDDLE | B_RING | B_PINKY, "ช่วยด้วย", "help" },    // 1+2+3+4+5 (fist)
+    { B_THUMB | B_INDEX,                      "เจ็บ",         "hurt" },          // 1+2
+    { B_INDEX,                                "ใช่",          "yes" },           // 2
+    { B_INDEX | B_MIDDLE,                     "ไม่ใช่",        "no" },            // 2+3
+    { B_THUMB,                                "หิวข้าว",      "hungry" },        // 1
+    { B_PINKY,                                "ต้องการน้ำ",   "need water" },     // 5
+    { B_RING | B_PINKY,                       "เข้าห้องน้ำ",   "bathroom" },      // 4+5
+    { B_THUMB | B_PINKY,                      "สวัสดี",       "hello" },         // 1+5
+    { B_INDEX | B_MIDDLE | B_RING | B_PINKY,  "ขอบคุณ",      "thank you" },     // 2+3+4+5
+    { B_INDEX | B_MIDDLE | B_RING,            "ไม่สบาย",      "sick" },          // 2+3+4
 };
 static const int GESTURE_COUNT = sizeof(GESTURES) / sizeof(GESTURES[0]);
 

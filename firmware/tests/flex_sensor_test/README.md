@@ -63,61 +63,23 @@ for gestures:
 
 ## Gestures
 
+The 10 most-useful phrases, each on an easy 1–2 finger (or full-fist) combo.
 Finger codes: **1**=thumb (โป้ง), **2**=index (ชี้), **3**=middle (กลาง),
 **4**=ring (นาง), **5**=pinky (ก้อย). Bend (งอ) the listed fingers and hold.
 Type `g` in the serial monitor for this list at runtime.
 
-### หมวดการใช้ชีวิตประจำวัน — daily life
-
-| Fingers | Phrase | English |
-|---|---|---|
-| 3 4   | หิวข้าว | hungry |
-| 1 3 4 | ดื่มน้ำ | drink water |
-| 1 2 3 5 | เข้าห้องน้ำ | bathroom |
-| 2     | ง่วงนอน | sleepy |
-| 1 5   | หนาว | cold |
-| 5     | ร้อน | hot |
-| 2 3   | อาบน้ำ | shower |
-| 2 3 4 | กลับบ้าน | go home |
-| 1     | ไม่สบาย | sick |
-| 2 5   | ทำความสะอาด | clean up |
-
-### หมวดการสื่อสารทั่วไป — communication
-
-| Fingers | Phrase | English |
-|---|---|---|
-| 1 4 5 | สวัสดี | hello |
-| 1 2 3 4 | ขอโทษ | sorry |
-| 2 3 4 5 | ขอบคุณ | thank you |
-| 3 4 5 | ใช่ | yes |
-| 1 3 4 5 | ไม่ใช่ | no |
-| 4     | รอสักครู่ | wait |
-| 3 5   | เข้าใจ | understand ⟳ |
-| 1 3   | ไม่เข้าใจ | don't understand |
-| 2 3 5 | ลาก่อน | goodbye ⟳ |
-| 1 2 3 | ไม่เป็นไร | it's ok |
-
-### หมวดขอความช่วยเหลือ — asking for help
-
-| Fingers | Phrase | English |
-|---|---|---|
-| 1 2 3 4 5 | ช่วยด้วย | help |
-| 2 4   | กลัว | scared |
-| 4 5   | หายใจไม่ออก | can't breathe |
-| 1 4   | ปวดหัว | headache |
-| 1 2   | ปวดท้อง | stomach ache |
-| 1 2 4 | เวียนหัว | dizzy ⟳ |
-| 1 3 5 | หลงทาง | lost |
-| 2 4 5 | ต้องการพัก | need rest |
-| 1 2 4 5 | เจ็บ | hurt ⟳ |
-| 1 2 5 | ต้องการน้ำ | need water ⟳ |
-
-> **⟳ Reassigned from the printed chart.** With binary bend-detection a glove
-> can't tell two phrases apart if they use the same fingers, and it can't detect
-> "spread all 5 fingers" (it reads the same as a flat hand). Five phrases were
-> moved to free finger combos so all 30 work — update the printed chart to match:
-> เข้าใจ (was = ใช่), เวียนหัว (was = ปวดหัว), เจ็บ (was = ต้องการพัก),
-> ต้องการน้ำ (was = ไม่เป็นไร), and ลาก่อน (was "กางทั้ง 5 นิ้ว").
+| Fingers | Phrase | English | |
+|---|---|---|---|
+| 1 2 3 4 5 | ช่วยด้วย | help | (กำมือ / fist) |
+| 1 2 | เจ็บ | hurt | |
+| 2 | ใช่ | yes | |
+| 2 3 | ไม่ใช่ | no | |
+| 1 | หิวข้าว | hungry | |
+| 5 | ต้องการน้ำ | need water | |
+| 4 5 | เข้าห้องน้ำ | bathroom | |
+| 1 5 | สวัสดี | hello | |
+| 2 3 4 5 | ขอบคุณ | thank you | (สี่นิ้ว ไม่รวมโป้ง) |
+| 2 3 4 | ไม่สบาย | sick | |
 
 ## Serial calibration
 
@@ -142,7 +104,7 @@ no re-flash needed. Settings persist until reset.
 **Tuning bend detection:** watch the per-finger `delta` while bending. Set `n`
 (bend-ON) comfortably below a full bend and `f` (bend-OFF) above the resting
 noise; the gap between them is hysteresis that stops a finger from chattering.
-Defaults are `n 320` / `f 180`.
+Defaults are `n 200` / `f 120`.
 
 Static tunables near the top of the sketch: defaults for `emaAlpha`,
 `samplesPerRead`, `medianFilter`, `bendOnDelta`, `bendOffDelta`, plus
