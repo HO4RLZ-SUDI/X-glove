@@ -19,6 +19,7 @@ import android.content.Context
 import android.content.pm.PackageManager
 import android.location.LocationManager
 import android.os.Build
+import android.speech.tts.TextToSpeech
 import android.os.Environment
 import android.os.SystemClock
 import androidx.core.content.ContextCompat
@@ -75,6 +76,12 @@ class BleViewModel(application: Application) : AndroidViewModel(application) {
     private var scanActive = false
     private var scanWatchdogJob: Job? = null
 
+    private var tts: TextToSpeech? = null
+
+    private fun speak(text: String) {
+        tts?.speak(text, TextToSpeech.QUEUE_FLUSH, null, null)
+    }
+
     /** Per-hand runtime state for the two simultaneous GATT connections. */
     private inner class HandLink(val hand: Hand) {
         var gatt: BluetoothGatt? = null
@@ -122,6 +129,11 @@ class BleViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     init {
+        tts = TextToSpeech(appContext) { status ->
+            if (status == TextToSpeech.SUCCESS) {
+                tts?.language = Locale("th", "TH")
+            }
+        }
         refreshDataset()
     }
 
@@ -1513,6 +1525,10 @@ class BleViewModel(application: Application) : AndroidViewModel(application) {
                 emitToast("บันทึกไม่สำเร็จ: $reason")
                 addLog("ESP32 rejected name (${hand.short}): $reason")
             }
+            fromNotification && text.startsWith("GEST:", ignoreCase = true) -> {
+                val word = text.substringAfter(":").trim()
+                if (word.isNotEmpty()) speak(word)
+            }
             fromNotification &&
                 text.startsWith("OK:OLED:", ignoreCase = true) -> {
                 val page = parseOledPageCode(text.substringAfterLast(":"))
@@ -1744,6 +1760,9 @@ class BleViewModel(application: Application) : AndroidViewModel(application) {
         datasetPlaybackJob?.cancel()
         stopScan()
         disconnectAll()
+        tts?.stop()
+        tts?.shutdown()
+        tts = null
         super.onCleared()
     }
 
