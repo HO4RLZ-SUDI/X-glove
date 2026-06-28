@@ -146,10 +146,15 @@ class BleViewModel(application: Application) : AndroidViewModel(application) {
         override fun onScanResult(callbackType: Int, result: ScanResult) {
             val advertisedName = result.scanRecord?.deviceName
             val fallbackName = if (hasConnectPermission()) result.device.name else null
-            val name = advertisedName ?: fallbackName ?: "Unknown ESP32"
             val hasService = result.scanRecord
                 ?.serviceUuids
                 ?.any { it.uuid == Esp32ServiceUuid } == true
+            // On Android 13 the device name can be null on first scan of an
+            // unpaired device even with BLUETOOTH_CONNECT granted. Fall back to
+            // a glove-like name so the filter below doesn't silently drop it;
+            // the real name shows up once GATT connects.
+            val name = advertisedName ?: fallbackName
+                ?: if (hasService) "Glove-ESP32" else "Unknown"
             val nameMatchesGlove = isLikelyGloveName(name)
 
             if (!nameMatchesGlove && !hasService) {
@@ -448,7 +453,7 @@ class BleViewModel(application: Application) : AndroidViewModel(application) {
                     }
                 }
                 newState == BluetoothProfile.STATE_CONNECTED -> {
-                    addLog("Connected (${hand.short}), discovering services")
+                    addLog("Connected (${hand.short}), negotiating MTU")
                     if (!hasConnectPermission()) {
                         showPermissionDenied()
                         handleDisconnected(hand, lost = false)
@@ -456,11 +461,10 @@ class BleViewModel(application: Application) : AndroidViewModel(application) {
                     }
                     updateHand(hand) { it.copy(phase = ConnectionPhase.DISCOVERING) }
                     gatt.requestConnectionPriority(BluetoothGatt.CONNECTION_PRIORITY_HIGH)
+                    // discoverServices() is called in onMtuChanged once MTU exchange
+                    // completes; calling both simultaneously causes GATT error 133 on
+                    // Android 13 because the two operations overlap on the ATT channel.
                     gatt.requestMtu(185)
-                    val discoveryStarted = gatt.discoverServices()
-                    if (!discoveryStarted) {
-                        failConnection(hand, "เริ่มค้นหา service ไม่สำเร็จ")
-                    }
                 }
                 newState == BluetoothProfile.STATE_DISCONNECTED -> {
                     addLog("Disconnected (${hand.short})")
@@ -527,8 +531,22 @@ class BleViewModel(application: Application) : AndroidViewModel(application) {
             readNameCharacteristic(gatt, characteristic)
         }
 
+        @SuppressLint("MissingPermission")
         override fun onMtuChanged(gatt: BluetoothGatt, mtu: Int, status: Int) {
             addLog("MTU changed (${hand.short}): mtu=$mtu status=$status")
+            // Only trigger discovery on the initial connection (phase == DISCOVERING).
+            // Subsequent MTU changes (e.g. from a reconnect race) should be ignored.
+            if (handState(hand).phase != ConnectionPhase.DISCOVERING) return
+            if (!hasConnectPermission()) {
+                showPermissionDenied()
+                handleDisconnected(hand, lost = false)
+                return
+            }
+            addLog("Starting service discovery (${hand.short})")
+            val discoveryStarted = gatt.discoverServices()
+            if (!discoveryStarted) {
+                failConnection(hand, "เริ่มค้นหา service ไม่สำเร็จ")
+            }
         }
 
         override fun onReadRemoteRssi(gatt: BluetoothGatt, rssi: Int, status: Int) {

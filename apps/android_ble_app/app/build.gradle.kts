@@ -29,6 +29,9 @@ android {
 }
 
 kotlin {
+    // Use the installed Java 25 JDK as the toolchain; still emit Java 17 bytecode
+    // so D8/R8 gets what it expects without needing a Java 17 JDK to be present.
+    jvmToolchain(25)
     compilerOptions {
         jvmTarget.set(JvmTarget.JVM_17)
     }

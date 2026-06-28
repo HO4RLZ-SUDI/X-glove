@@ -11,7 +11,7 @@
 #include <BLEUtils.h>
 #include <Preferences.h>
 
-#define FW_VERSION "2.2.0"
+#define FW_VERSION "2.3.0"
 
 #ifndef GLOVE_ENABLE_OLED
 #define GLOVE_ENABLE_OLED 1
@@ -67,6 +67,13 @@ static const uint16_t TELEMETRY_MAX_INTERVAL_MS = 1000;
 // Exponential moving average weight for flex readings (0..1, higher = snappier).
 static const float FLEX_EMA_ALPHA = 0.45f;
 static const uint32_t BATTERY_READ_INTERVAL_MS = 2000;
+
+// Adaptive baseline: slowly corrects flat-hand drift caused by flex sensor
+// mechanical hysteresis after repeated bending.
+static const float ADAPTIVE_BASELINE_ALPHA = 0.005f;  // ~20s time constant at 40ms sample rate
+static const int ADAPTIVE_IDLE_THRESHOLD = 150;        // below GESTURE_BEND_ON=200; finger is "at rest"
+static const uint32_t ADAPTIVE_IDLE_DURATION_MS = 2000;
+static const uint32_t ADAPTIVE_NVS_SAVE_INTERVAL_MS = 30000;
 
 #if GLOVE_ENABLE_IMU
 // MPU6050 on the shared I2C bus (same SDA/SCL as the OLED). AD0 low = 0x68.
@@ -194,6 +201,10 @@ bool flexEmaReady = false;
 float gestureEma[FLEX_COUNT] = {0};
 bool gestureEmaReady = false;
 int gestureBaseline[FLEX_COUNT] = {0};
+
+bool adaptiveIdleTracking = false;
+uint32_t adaptiveIdleSince = 0;
+uint32_t lastAdaptiveNvsSaveMs = 0;
 bool fingerBent[FLEX_COUNT] = {false};
 uint8_t gestureMaskCandidate = 0;   // pattern currently being held / settled
 uint32_t gestureCandidateSince = 0; // millis() when that pattern began
@@ -448,6 +459,47 @@ static void captureGestureBaseline() {
     gestureSpokenMask = 0;
 }
 
+// Slowly drift flexBaseline and gestureBaseline toward the current flat-hand
+// reading while all fingers are at rest, correcting mechanical hysteresis drift.
+static void updateAdaptiveBaseline() {
+    if (!gestureEmaReady || flexBaseline[0] == 0) return;
+
+    bool allIdle = true;
+    for (int i = 0; i < FLEX_COUNT; i++) {
+        int delta = abs(static_cast<int>(lroundf(gestureEma[i])) - gestureBaseline[i]);
+        if (delta >= ADAPTIVE_IDLE_THRESHOLD) { allIdle = false; break; }
+    }
+
+    uint32_t now = millis();
+    if (!allIdle) {
+        adaptiveIdleTracking = false;
+        return;
+    }
+    if (!adaptiveIdleTracking) {
+        adaptiveIdleSince = now;
+        adaptiveIdleTracking = true;
+        return;
+    }
+    if (now - adaptiveIdleSince < ADAPTIVE_IDLE_DURATION_MS) return;
+
+    for (int i = 0; i < FLEX_COUNT; i++) {
+        float cur = gestureEma[i];
+        flexBaseline[i] = static_cast<uint16_t>(
+            lroundf(flexBaseline[i] + ADAPTIVE_BASELINE_ALPHA * (cur - flexBaseline[i]))
+        );
+        gestureBaseline[i] = static_cast<int>(
+            lroundf(gestureBaseline[i] + ADAPTIVE_BASELINE_ALPHA * (cur - gestureBaseline[i]))
+        );
+    }
+
+    if (now - lastAdaptiveNvsSaveMs >= ADAPTIVE_NVS_SAVE_INTERVAL_MS) {
+        for (int i = 0; i < FLEX_COUNT; i++) {
+            prefs.putUShort(("z" + String(i)).c_str(), flexBaseline[i]);
+        }
+        lastAdaptiveNvsSaveMs = now;
+    }
+}
+
 // Sample the flex sensors, build the bent-finger pattern, and fire a phrase when
 // a known pattern has been held steady. Rate-limited to GESTURE_SAMPLE_MS.
 static void updateGestures() {
@@ -491,6 +543,8 @@ static void updateGestures() {
             // reach a known combo still fires.
         }
     }
+
+    updateAdaptiveBaseline();
 }
 
 static void calibrateFlexBaseline() {
@@ -1408,6 +1462,7 @@ void setup() {
 #endif
     startBle();
 
+    lastAdaptiveNvsSaveMs = millis(); // don't trigger NVS write immediately on first idle
     Serial.print("Glove firmware v" FW_VERSION " advertising as ");
     Serial.println(deviceName);
 #if GLOVE_ENABLE_OLED
